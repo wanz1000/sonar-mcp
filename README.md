@@ -25,14 +25,24 @@ A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop
 
 ## 📋 Prerequisites
 
-Before starting, make sure you have all of the following:
+### You install these first (the installer cannot do these for you)
 
-- **Active Claude subscription** — [Claude Pro or Team](https://claude.ai/upgrade) with Claude Desktop installed and signed in
-- **[Claude Desktop](https://claude.ai/download)** — the desktop app (not the web version)
-- **[Ollama](https://ollama.com)** — running locally on `http://localhost:11434`
-- **[Node.js](https://nodejs.org) 18 or later**
+- **Active Claude subscription** — [Claude Pro or Team](https://claude.ai/upgrade). Sonar offloads work from Claude to free local models, so it only makes sense if you're paying for Claude tokens.
+- **[Claude Desktop](https://claude.ai/download)** — the desktop app (not the web version), signed in to your account.
+- **[Node.js](https://nodejs.org) 18 or later** — needed to run the installer itself. Verify with `node --version`.
+- **[Ollama](https://ollama.com)** — install the app, then launch it once so it's running (Windows tray icon / macOS menu bar). Models are pulled by the installer below.
 - **A GPU with ~8 GB VRAM** (recommended) — Ollama auto-detects NVIDIA, AMD, and Apple Silicon. Sonar uses `keep_alive: 0` so models load one at a time.
   - **No GPU?** Ollama also runs on CPU only — it's much slower (10–60× slower for small models) but functional.
+
+### The installer handles these automatically
+
+- ✅ `npm install` — Node dependencies (`@modelcontextprotocol/sdk`, `node-fetch`)
+- ✅ `ollama pull llama3.1:8b` — general-task model (~5 GB)
+- ✅ `ollama pull qwen2.5-coder:7b` — coding model (~5 GB)
+- ✅ Edits `claude_desktop_config.json` to register the MCP server (existing entries preserved)
+- ✅ Verifies the server starts cleanly before finishing
+
+If a model is already pulled or dependencies are already installed, the installer skips that step.
 
 ---
 
