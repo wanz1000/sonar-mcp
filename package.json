@@ -1,15 +1,30 @@
 {
   "name": "sonar-mcp",
   "version": "1.0.0",
+  "description": "MCP server that connects Claude Desktop to local Ollama models with auto-routing and live web search.",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "type": "module",
+  "scripts": {
+    "setup": "node install.js",
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wanz1000/sonar-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ollama",
+    "claude",
+    "local-llm",
+    "llama",
+    "qwen"
+  ],
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "node-fetch": "^3.3.2"

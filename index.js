@@ -22,6 +22,18 @@ const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+// Wrap fetch with an AbortController so a hung Ollama or web request can't freeze
+// the MCP server (and therefore Claude Desktop) indefinitely.
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 120000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetchWithTimeout(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Token tracking ────────────────────────────────────────────────────────────
 
 function loadStats() {
@@ -102,7 +114,7 @@ function extractUrl(text) {
 
 async function fetchUrl(url) {
   console.error(`[sonar/web] fetching URL: ${url}`);
-  const res  = await fetch(url, { headers: { "User-Agent": BROWSER_UA } });
+  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 15000);
   const html = await res.text();
   const text = stripHtml(html);
   // Trim to ~6 000 chars so the model context doesn't explode
@@ -112,7 +124,7 @@ async function fetchUrl(url) {
 async function webSearch(query) {
   console.error(`[sonar/web] searching DuckDuckGo: ${query}`);
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const res  = await fetch(url, { headers: { "User-Agent": BROWSER_UA } });
+  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 15000);
   const html = await res.text();
 
   // Pull result links + snippets from DDG HTML response
@@ -159,7 +171,7 @@ async function webSearch(query) {
 // ── Ollama calls ──────────────────────────────────────────────────────────────
 
 async function askOllama(model, prompt) {
-  const res  = await fetch(OLLAMA_CHAT_URL, {
+  const res  = await fetchWithTimeout(OLLAMA_CHAT_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -253,61 +265,94 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }));
 
+// Translate raw failures into something a user can actually act on.
+function friendlyError(err) {
+  const msg = err?.message ?? String(err);
+  if (err?.name === "AbortError" || /timeout|aborted/i.test(msg)) {
+    return "⚠️ Sonar timed out. The model may still be loading into VRAM on first call — try again in a few seconds. If it persists, check that Ollama is responsive.";
+  }
+  if (/ECONNREFUSED|fetch failed|ENOTFOUND/i.test(msg)) {
+    return "⚠️ Sonar can't reach Ollama at http://localhost:11434. Start the Ollama app (Windows tray icon / macOS menu bar) and retry.";
+  }
+  if (/model.*not found|pull.*model/i.test(msg)) {
+    return "⚠️ The required Ollama model isn't installed. Run: ollama pull llama3.1:8b && ollama pull qwen2.5-coder:7b";
+  }
+  if (/out of memory|cudaMalloc/i.test(msg)) {
+    return "⚠️ GPU ran out of VRAM. Close other GPU-using apps (games, video editors) and retry. Sonar uses keep_alive:0 so models unload after each call.";
+  }
+  return `⚠️ Sonar error: ${msg}`;
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  if (name === "sonar_stats") {
-    return { content: [{ type: "text", text: aggregateStats() }] };
-  }
+  try {
+    if (name === "sonar_stats") {
+      return { content: [{ type: "text", text: aggregateStats() }] };
+    }
 
-  if (name === "sonar") {
-    const prompt = args.prompt;
+    if (name === "sonar") {
+      const prompt = args.prompt;
 
-    console.error(`[sonar] classifying prompt...`);
-    const route = await classifyPrompt(prompt);
+      console.error(`[sonar] classifying prompt...`);
+      const route = await classifyPrompt(prompt);
 
-    // ── Web route ──────────────────────────────────────────────────────────
-    if (route === "web") {
-      const explicitUrl = extractUrl(prompt);
-      let webContext;
-      let source;
+      // ── Web route ──────────────────────────────────────────────────────────
+      if (route === "web") {
+        const explicitUrl = extractUrl(prompt);
+        let webContext;
+        let source;
 
-      if (explicitUrl) {
-        webContext = await fetchUrl(explicitUrl);
-        source     = `fetched: ${explicitUrl}`;
-      } else {
-        webContext = await webSearch(prompt);
-        source     = `DuckDuckGo search`;
+        try {
+          if (explicitUrl) {
+            webContext = await fetchUrl(explicitUrl);
+            source     = `fetched: ${explicitUrl}`;
+          } else {
+            webContext = await webSearch(prompt);
+            source     = `DuckDuckGo search`;
+          }
+        } catch (e) {
+          // Fall back to model-only answer if web fails
+          console.error(`[sonar/web] fetch failed (${e.message}) — falling back to model-only`);
+          webContext = `(web fetch failed: ${e.message})`;
+          source     = `web fetch failed — answering from training data only`;
+        }
+
+        const augmented =
+          `Use the following live web content to answer the question.\n\n` +
+          `--- WEB CONTENT (${source}) ---\n${webContext}\n--- END ---\n\n` +
+          `Question: ${prompt}`;
+
+        console.error(`[sonar] routing to ${MODELS.simple} with web context`);
+        const { content, promptTokens, completionTokens } = await askOllama(MODELS.simple, augmented);
+        saveTokens(promptTokens, completionTokens);
+        console.error(`[sonar] tokens — prompt: ${promptTokens}, completion: ${completionTokens}`);
+
+        return {
+          content: [{ type: "text", text: `[routed to ${MODELS.simple} + ${source}]\n\n${content}` }],
+        };
       }
 
-      const augmented =
-        `Use the following live web content to answer the question.\n\n` +
-        `--- WEB CONTENT (${source}) ---\n${webContext}\n--- END ---\n\n` +
-        `Question: ${prompt}`;
-
-      console.error(`[sonar] routing to ${MODELS.simple} with web context`);
-      const { content, promptTokens, completionTokens } = await askOllama(MODELS.simple, augmented);
+      // ── Simple / Coder route ───────────────────────────────────────────────
+      const model = MODELS[route];
+      console.error(`[sonar] routing to ${model}`);
+      const { content, promptTokens, completionTokens } = await askOllama(model, prompt);
       saveTokens(promptTokens, completionTokens);
       console.error(`[sonar] tokens — prompt: ${promptTokens}, completion: ${completionTokens}`);
 
       return {
-        content: [{ type: "text", text: `[routed to ${MODELS.simple} + ${source}]\n\n${content}` }],
+        content: [{ type: "text", text: `[routed to ${model}]\n\n${content}` }],
       };
     }
 
-    // ── Simple / Coder route ───────────────────────────────────────────────
-    const model = MODELS[route];
-    console.error(`[sonar] routing to ${model}`);
-    const { content, promptTokens, completionTokens } = await askOllama(model, prompt);
-    saveTokens(promptTokens, completionTokens);
-    console.error(`[sonar] tokens — prompt: ${promptTokens}, completion: ${completionTokens}`);
-
+    throw new Error(`Unknown tool: ${name}`);
+  } catch (err) {
+    console.error(`[sonar] error: ${err?.stack ?? err}`);
     return {
-      content: [{ type: "text", text: `[routed to ${model}]\n\n${content}` }],
+      content: [{ type: "text", text: friendlyError(err) }],
+      isError: true,
     };
   }
-
-  throw new Error(`Unknown tool: ${name}`);
 });
 
 const transport = new StdioServerTransport();

@@ -31,43 +31,64 @@ Before starting, make sure you have all of the following:
 - **[Claude Desktop](https://claude.ai/download)** — the desktop app (not the web version)
 - **[Ollama](https://ollama.com)** — running locally on `http://localhost:11434`
 - **[Node.js](https://nodejs.org) 18 or later**
-- **A GPU with enough VRAM** — 8 GB minimum recommended (models load one at a time)
+- **A GPU with ~8 GB VRAM** (recommended) — Ollama auto-detects NVIDIA, AMD, and Apple Silicon. Sonar uses `keep_alive: 0` so models load one at a time.
+  - **No GPU?** Ollama also runs on CPU only — it's much slower (10–60× slower for small models) but functional.
 
 ---
 
 ## 🚀 Installation
 
-### Step 1 — Pull the Ollama models
+### Automatic (recommended)
 
-Open a terminal and run:
+Clone the repo, then run the installer — it handles everything:
 
+```bash
+git clone https://github.com/wanz1000/sonar-mcp.git
+cd sonar-mcp
+npm install
+npm run setup
+```
+
+The installer will:
+1. ✔ Verify Node.js 18+
+2. ✔ Run `npm install`
+3. ✔ Check Ollama and pull `llama3.1:8b` + `qwen2.5-coder:7b` if not already present
+4. ✔ Auto-detect your Claude Desktop config file (Windows & macOS)
+5. ✔ Merge the MCP server entry without touching any existing config
+6. ✔ Verify the server starts cleanly
+
+When it finishes, **fully quit Claude Desktop** (system tray / menu bar — don't just close the window) and reopen it. Done.
+
+---
+
+### Manual (if you prefer)
+
+<details>
+<summary>Click to expand manual steps</summary>
+
+**1. Pull the Ollama models**
 ```bash
 ollama pull llama3.1:8b
 ollama pull qwen2.5-coder:7b
 ```
 
-This downloads both models Sonar routes between. Only needs to be done once.
-
-### Step 2 — Clone and install
-
+**2. Clone and install**
 ```bash
 git clone https://github.com/wanz1000/sonar-mcp.git
 cd sonar-mcp
 npm install
 ```
 
-### Step 3 — Find your Claude Desktop config file
+**3. Find your Claude Desktop config file**
 
 | OS | Path |
 |---|---|
 | Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 | macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 
-Open that file in any text editor.
+**4. Add the MCP server config**
 
-### Step 4 — Add the MCP server config
-
-Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your cloned `sonar-mcp` folder:
+Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your cloned folder:
 
 ```json
 {
@@ -81,25 +102,15 @@ Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your
 }
 ```
 
-**Windows example:**
-```json
-"args": ["C:\\Users\\yourname\\sonar-mcp\\index.js"]
-```
+**5. Restart Claude Desktop**
 
-**macOS example:**
-```json
-"args": ["/Users/yourname/sonar-mcp/index.js"]
-```
+Fully quit (system tray / menu bar) and reopen.
 
-> If the file already has an `mcpServers` block, add `ollama-local` inside it alongside any existing entries.
+**6. Confirm it's connected**
 
-### Step 5 — Restart Claude Desktop
+Go to **Claude Desktop → Settings → Developer**. You should see `ollama-local` with a green connected status.
 
-Fully quit Claude Desktop (check the system tray / menu bar — don't just close the window) and reopen it.
-
-### Step 6 — Confirm it's connected
-
-Go to **Claude Desktop → Settings → Developer**. You should see `ollama-local` listed with a green connected status.
+</details>
 
 ---
 
