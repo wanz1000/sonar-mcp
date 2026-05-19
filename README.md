@@ -2,6 +2,8 @@
 
 A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop** to local **Ollama** models. One tool — `sonar` — automatically routes every prompt to the right model, including live web search when needed. Free, fast, and runs entirely on your GPU.
 
+> **⚠️ Claude subscription required.** Sonar is designed to offload work from Claude to free local models, reducing token consumption. You need an active [Claude Pro or Team subscription](https://claude.ai/upgrade) with Claude Desktop to use it.
+
 ---
 
 ## ✨ Features
@@ -23,33 +25,49 @@ A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop
 
 ## 📋 Prerequisites
 
-- [Ollama](https://ollama.com) running locally on `http://localhost:11434`
-- The two models pulled:
-  ```bash
-  ollama pull llama3.1:8b
-  ollama pull qwen2.5-coder:7b
-  ```
-- [Node.js](https://nodejs.org) 18 or later
-- [Claude Desktop](https://claude.ai/download)
+Before starting, make sure you have all of the following:
+
+- **Active Claude subscription** — [Claude Pro or Team](https://claude.ai/upgrade) with Claude Desktop installed and signed in
+- **[Claude Desktop](https://claude.ai/download)** — the desktop app (not the web version)
+- **[Ollama](https://ollama.com)** — running locally on `http://localhost:11434`
+- **[Node.js](https://nodejs.org) 18 or later**
+- **A GPU with enough VRAM** — 8 GB minimum recommended (models load one at a time)
 
 ---
 
 ## 🚀 Installation
 
+### Step 1 — Pull the Ollama models
+
+Open a terminal and run:
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/sonar-mcp.git
+ollama pull llama3.1:8b
+ollama pull qwen2.5-coder:7b
+```
+
+This downloads both models Sonar routes between. Only needs to be done once.
+
+### Step 2 — Clone and install
+
+```bash
+git clone https://github.com/wanz1000/sonar-mcp.git
 cd sonar-mcp
 npm install
 ```
 
-Then find your Claude Desktop config file:
+### Step 3 — Find your Claude Desktop config file
 
 | OS | Path |
 |---|---|
 | Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 | macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 
-Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your cloned folder:
+Open that file in any text editor.
+
+### Step 4 — Add the MCP server config
+
+Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your cloned `sonar-mcp` folder:
 
 ```json
 {
@@ -63,13 +81,31 @@ Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your
 }
 ```
 
-**Restart Claude Desktop.** The `sonar` and `sonar_stats` tools will appear automatically.
+**Windows example:**
+```json
+"args": ["C:\\Users\\yourname\\sonar-mcp\\index.js"]
+```
+
+**macOS example:**
+```json
+"args": ["/Users/yourname/sonar-mcp/index.js"]
+```
+
+> If the file already has an `mcpServers` block, add `ollama-local` inside it alongside any existing entries.
+
+### Step 5 — Restart Claude Desktop
+
+Fully quit Claude Desktop (check the system tray / menu bar — don't just close the window) and reopen it.
+
+### Step 6 — Confirm it's connected
+
+Go to **Claude Desktop → Settings → Developer**. You should see `ollama-local` listed with a green connected status.
 
 ---
 
 ## 💬 Usage
 
-Just talk to Claude normally. Use `sonar` for anything you want handled locally:
+In any Claude Desktop conversation, type `sonar` followed by your request:
 
 ```
 sonar explain how transformers work
@@ -79,19 +115,41 @@ sonar summarize https://example.com/article
 sonar_stats
 ```
 
-Sonar will route it to the right model (or fetch the web) and return the answer — no confirmation prompts needed.
+Sonar will route it to the right model (or fetch the web) and return the answer — no confirmation prompts needed. The result shows which model handled it, for example:
+
+```
+[routed to llama3.1:8b]
+
+Transformers are a neural network architecture...
+```
 
 ---
 
 ## 🗂 Token stats
 
-`token-stats.json` is created automatically next to `index.js` and updated after every call. It tracks prompt tokens + completion tokens per calendar day. Run `sonar_stats` any time to see your cumulative savings.
+`token-stats.json` is created automatically next to `index.js` and updated after every call. It tracks prompt tokens + completion tokens per calendar day.
+
+Ask `sonar_stats` any time to see your totals:
+
+```
+📊 Sonar Token Usage (processed locally)
+
+  Today   : 1,240 tokens across 6 requests
+  Week    : 8,430 tokens across 41 requests
+  Month   : 31,200 tokens across 158 requests
+  Year    : 31,200 tokens across 158 requests
+```
 
 ---
 
 ## 🛠 Customization
 
-Open `index.js` to change models, adjust the routing keyword list, or tweak the web-search logic. The three routing paths are clearly separated and easy to extend.
+Open `index.js` to:
+- **Swap models** — change `MODELS.simple` or `MODELS.coder` to any model you have pulled in Ollama
+- **Tune the web keyword list** — add terms to `WEB_KEYWORDS` to expand what triggers a live search
+- **Adjust context size** — modify the `fetchUrl` character limit to send more or less page content to the model
+
+The three routing paths (simple / coder / web) are clearly separated and easy to extend.
 
 ---
 
