@@ -11,6 +11,8 @@ import { fileURLToPath } from "url";
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const STATS_FILE = path.join(__dirname, "token-stats.json");
+const PKG        = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
+const VERSION    = PKG.version;
 
 const OLLAMA_CHAT_URL = "http://localhost:11434/api/chat";
 const MODELS = {
@@ -85,12 +87,14 @@ function aggregateStats() {
   };
 
   return [
-    `📊 Sonar Token Usage (processed locally)`,
+    `📊 Sonar Token Usage (processed locally)   sonar-mcp v${VERSION}`,
     ``,
     `  Today   : ${fmt(totals.today)}`,
     `  Week    : ${fmt(totals.week)}`,
     `  Month   : ${fmt(totals.month)}`,
     `  Year    : ${fmt(totals.year)}`,
+    ``,
+    `  To update: run "npm run update" in the sonar-mcp folder.`,
   ].join("\n");
 }
 
@@ -232,7 +236,7 @@ async function classifyPrompt(prompt) {
 // ── MCP server ────────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "ollama-local", version: "1.0.0" },
+  { name: "ollama-local", version: VERSION },
   { capabilities: { tools: {} } }
 );
 

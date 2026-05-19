@@ -5,8 +5,9 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "setup": "node install.js",
-    "start": "node index.js"
+    "setup":  "node install.js",
+    "update": "node install.js --update",
+    "start":  "node index.js"
   },
   "engines": {
     "node": ">=18"

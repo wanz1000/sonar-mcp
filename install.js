@@ -21,6 +21,11 @@ const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_JS   = path.resolve(__dirname, "index.js");
 const NODE_MODS  = path.join(__dirname, "node_modules");
 const AUTO_YES   = process.argv.includes("--yes") || process.argv.includes("-y");
+const UPDATE     = process.argv.includes("--update") || process.argv.includes("-u");
+
+// Read version from package.json — single source of truth
+const PKG = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
+const VERSION = PKG.version;
 
 // ── Pretty output ─────────────────────────────────────────────────────────────
 const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -153,11 +158,96 @@ async function listOllamaModels() {
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────────────
-console.log(BOLD("\n🔊 sonar-mcp installer\n"));
+console.log(BOLD(`\n🔊 sonar-mcp installer ${DIM("v" + VERSION)}\n`));
 console.log(DIM("  This installer will NOT touch your system without showing you a summary first."));
 console.log(DIM("  On any error or cancellation, all changes are rolled back automatically.\n"));
 
 try {
+
+// ── UPDATE MODE ───────────────────────────────────────────────────────────────
+if (UPDATE) {
+  head("Update mode — pulling latest from GitHub");
+
+  // Must be inside a git checkout
+  if (!fs.existsSync(path.join(__dirname, ".git"))) {
+    console.log(RED("  ✘ This folder is not a git checkout."));
+    console.log("  To update, re-clone the repo:");
+    console.log(`    git clone https://github.com/wanz1000/sonar-mcp.git`);
+    panicAndExit("not a git checkout — cannot use --update", 1);
+  }
+
+  // Warn if local changes would conflict
+  const status = spawnSync("git", ["status", "--porcelain"], { cwd: __dirname, encoding: "utf8" });
+  if ((status.stdout || "").trim().length > 0) {
+    warn("You have uncommitted local changes:");
+    console.log(status.stdout);
+    const ans = await ask("  Continue anyway? Local changes may conflict with the pull. [y/N] ", "n");
+    if (ans !== "y" && ans !== "yes") {
+      console.log("\n  Cancelled. Stash or commit your changes first, then re-run.\n");
+      process.exit(0);
+    }
+  }
+
+  // Fetch
+  info("Fetching latest from origin...");
+  const fetch = spawnSync("git", ["fetch", "origin"], { cwd: __dirname, stdio: "inherit", shell: true });
+  if (fetch.status !== 0) panicAndExit("git fetch failed", 1);
+
+  // Compare local vs remote
+  const localSha  = spawnSync("git", ["rev-parse", "HEAD"], { cwd: __dirname, encoding: "utf8" }).stdout.trim();
+  const remoteSha = spawnSync("git", ["rev-parse", "origin/main"], { cwd: __dirname, encoding: "utf8" }).stdout.trim();
+
+  if (localSha === remoteSha) {
+    console.log(GREEN(`\n  ✔ Already up to date (v${VERSION} — ${localSha.slice(0, 7)})\n`));
+    process.exit(0);
+  }
+
+  // Show what's coming
+  info("New commits available:");
+  spawnSync("git", ["log", "--oneline", `${localSha}..origin/main`], { cwd: __dirname, stdio: "inherit", shell: true });
+  console.log("");
+
+  const proceed = await ask(`  Pull these changes? [y/N] `, "n");
+  if (proceed !== "y" && proceed !== "yes") {
+    console.log("\n  Cancelled. No changes pulled.\n");
+    process.exit(0);
+  }
+
+  // Pull
+  info("Pulling...");
+  const pull = spawnSync("git", ["pull", "origin", "main"], { cwd: __dirname, stdio: "inherit", shell: true });
+  if (pull.status !== 0) panicAndExit("git pull failed — fix conflicts manually and re-run", 1);
+  ok("Pull complete");
+
+  // Re-run npm install if package.json or package-lock changed
+  const changed = spawnSync("git", ["diff", "--name-only", "HEAD@{1}", "HEAD"], { cwd: __dirname, encoding: "utf8" }).stdout;
+  if (/package(-lock)?\.json/.test(changed)) {
+    info("Dependencies changed — running npm install...");
+    const np = spawnSync("npm", ["install"], { cwd: __dirname, stdio: "inherit", shell: true });
+    if (np.status !== 0) panicAndExit("npm install failed after pull", 1);
+    ok("Dependencies updated");
+  } else {
+    ok("No dependency changes — skipping npm install");
+  }
+
+  // Verify the server still starts
+  info("Verifying updated server starts...");
+  const child = spawnSync(process.execPath, [INDEX_JS], { timeout: 3000, shell: false, encoding: "utf8" });
+  const out = (child.stderr || "") + (child.stdout || "");
+  if (out.includes("[sonar] Ollama MCP server running")) {
+    ok("Server starts successfully");
+  } else {
+    panicAndExit("Updated server did not start — check the new index.js", 1);
+  }
+
+  // Re-read version after pull
+  const newPkg = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
+  console.log("\n" + BOLD(GREEN(`✅ Updated to v${newPkg.version}\n`)));
+  console.log(`  ${BOLD("Fully restart Claude Desktop")} (quit from system tray / menu bar, then reopen)`);
+  console.log(`  to load the updated MCP server.\n`);
+  process.exit(0);
+}
+
 
 // ── PRE-FLIGHT (read-only) ────────────────────────────────────────────────────
 head("Pre-flight checks (read-only)");

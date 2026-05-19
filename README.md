@@ -134,6 +134,29 @@ Go to **Claude Desktop → Settings → Developer**. You should see `ollama-loca
 
 ---
 
+## 🔄 Updating
+
+To pull the latest version from GitHub, from your cloned folder run:
+
+```bash
+npm run update
+```
+
+(or equivalently `node install.js --update`)
+
+This will:
+
+1. `git fetch` and show you exactly which new commits are coming
+2. Ask for confirmation before pulling — same safety guarantees apply
+3. `npm install` only if dependencies actually changed
+4. Verify the updated MCP server starts cleanly before reporting success
+
+If you're already on the latest version, it exits immediately and tells you so. After a successful update, **fully restart Claude Desktop** for the new code to take effect.
+
+You can also see the running version any time by asking `sonar_stats` — it prints the current `sonar-mcp` version on the first line.
+
+---
+
 ## 💬 Usage
 
 In any Claude Desktop conversation, type `sonar` followed by your request:
