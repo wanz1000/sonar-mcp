@@ -59,15 +59,25 @@ npm install
 npm run setup
 ```
 
-The installer will:
-1. ✔ Verify Node.js 18+
-2. ✔ Run `npm install`
-3. ✔ Check Ollama and pull `llama3.1:8b` + `qwen2.5-coder:7b` if not already present
-4. ✔ Auto-detect your Claude Desktop config file (Windows & macOS)
-5. ✔ Merge the MCP server entry without touching any existing config
+The installer is **read-only until you confirm**. It runs pre-flight checks, prints a summary of exactly what it will do, and asks `Proceed? [y/N]` before any changes. If you say no, nothing changes.
+
+Once confirmed it will:
+1. ✔ Verify Node.js 18+ (prompts to update if too old, doesn't proceed otherwise)
+2. ✔ Run `npm install` (only if `node_modules` doesn't already exist)
+3. ✔ Pull `llama3.1:8b` + `qwen2.5-coder:7b` (only the ones not already present)
+4. ✔ Auto-detect your Claude Desktop config file (Windows/macOS/Linux)
+5. ✔ Add ONE entry to `claude_desktop_config.json` — every other entry is preserved
 6. ✔ Verify the server starts cleanly
 
 When it finishes, **fully quit Claude Desktop** (system tray / menu bar — don't just close the window) and reopen it. Done.
+
+### 🛡️ Safety guarantees
+
+- **Read-only pre-flight.** No file is written until you confirm at the `Proceed?` prompt.
+- **Always backs up first.** Before editing `claude_desktop_config.json`, the installer writes `claude_desktop_config.json.bak-<timestamp>` next to it so you can recover manually any time.
+- **Auto-rollback on failure or Ctrl+C.** If anything errors mid-install — or you cancel — the installer restores your original config exactly as it was, and removes `node_modules` if it didn't exist before. Your existing Ollama models are *never* removed (they may be useful for other things).
+- **Version checks halt the installer.** If Node.js is too old, you're prompted to update or cancel; no changes happen until both are resolved.
+- **Run with `--yes` to skip the prompt** (for CI/automation): `npm run setup -- --yes`
 
 ---
 

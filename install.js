@@ -1,182 +1,327 @@
 #!/usr/bin/env node
 /**
  * sonar-mcp installer
- * Checks prerequisites, pulls Ollama models, and wires Claude Desktop config automatically.
+ *
+ * SAFETY GUARANTEES:
+ *  - Will not touch your system or settings without showing a summary first
+ *  - Always backs up claude_desktop_config.json before editing it
+ *  - On any error, Ctrl+C, or unsupported version: rolls back changes
+ *  - Never removes anything you had before running it
+ *  - Pass --yes to skip the confirmation prompt (for automation)
  */
 
-import fs   from "fs";
-import path from "path";
-import os   from "os";
-import { execSync, spawnSync } from "child_process";
-import { fileURLToPath }       from "url";
+import fs       from "fs";
+import path     from "path";
+import os       from "os";
+import readline from "readline";
+import { spawnSync }     from "child_process";
+import { fileURLToPath } from "url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const INDEX_JS  = path.resolve(__dirname, "index.js");
+const __dirname  = path.dirname(fileURLToPath(import.meta.url));
+const INDEX_JS   = path.resolve(__dirname, "index.js");
+const NODE_MODS  = path.join(__dirname, "node_modules");
+const AUTO_YES   = process.argv.includes("--yes") || process.argv.includes("-y");
 
-// Only emit ANSI colors when stdout is a TTY and not explicitly disabled.
-// Legacy Windows cmd.exe and piped output get plain text instead of escape codes.
+// ── Pretty output ─────────────────────────────────────────────────────────────
 const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
 const wrap = (code) => (s) => USE_COLOR ? `\x1b[${code}m${s}\x1b[0m` : String(s);
 const GREEN  = wrap(32);
 const RED    = wrap(31);
 const YELLOW = wrap(33);
 const BOLD   = wrap(1);
+const DIM    = wrap(2);
 
-const ok   = (msg) => console.log(GREEN("  ✔ ") + msg);
-const fail = (msg) => { console.log(RED("  ✘ ") + msg); process.exit(1); };
-const warn = (msg) => console.log(YELLOW("  ⚠ ") + msg);
-const info = (msg) => console.log("  → " + msg);
+const ok   = (m) => console.log(GREEN("  ✔ ") + m);
+const warn = (m) => console.log(YELLOW("  ⚠ ") + m);
+const info = (m) => console.log("  → " + m);
+const head = (m) => console.log("\n" + BOLD(m));
 
+// ── Interactive prompt helper ─────────────────────────────────────────────────
+async function ask(question, defaultAnswer = "") {
+  if (AUTO_YES) return "y";
+  if (!process.stdin.isTTY) {
+    warn(`stdin is not a TTY — assuming "${defaultAnswer || "no"}" for: ${question}`);
+    return defaultAnswer;
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(resolve => {
+    rl.question(question, a => { rl.close(); resolve(a.trim().toLowerCase()); });
+  });
+}
+
+// ── Rollback machinery ────────────────────────────────────────────────────────
+const SNAPSHOT = {
+  taken:               false,
+  configPath:          null,
+  configExisted:       false,
+  configContent:       null,   // original bytes
+  configBackupPath:    null,   // path of the .bak file we wrote
+  nodeModulesExisted:  false,
+  configWasModified:   false,
+  nodeModulesCreated:  false,
+};
+
+function takeSnapshot(configPath) {
+  SNAPSHOT.taken              = true;
+  SNAPSHOT.configPath         = configPath;
+  SNAPSHOT.configExisted      = fs.existsSync(configPath);
+  SNAPSHOT.configContent      = SNAPSHOT.configExisted ? fs.readFileSync(configPath, "utf8") : null;
+  SNAPSHOT.nodeModulesExisted = fs.existsSync(NODE_MODS);
+
+  // Always write a timestamped backup of the config file before any edit,
+  // so the user has a recoverable copy even if the process is killed -9.
+  if (SNAPSHOT.configExisted) {
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    SNAPSHOT.configBackupPath = `${configPath}.bak-${ts}`;
+    fs.copyFileSync(configPath, SNAPSHOT.configBackupPath);
+    info(`Backup written: ${SNAPSHOT.configBackupPath}`);
+  }
+}
+
+function rollback(reason) {
+  if (!SNAPSHOT.taken) {
+    console.log(YELLOW(`\nNothing to roll back — no changes had been made yet.`));
+    return;
+  }
+
+  console.log(YELLOW(`\n↩  Rolling back: ${reason}\n`));
+
+  // 1. Restore claude_desktop_config.json
+  if (SNAPSHOT.configWasModified) {
+    if (SNAPSHOT.configExisted) {
+      fs.writeFileSync(SNAPSHOT.configPath, SNAPSHOT.configContent);
+      ok(`Restored original config: ${SNAPSHOT.configPath}`);
+    } else if (fs.existsSync(SNAPSHOT.configPath)) {
+      fs.unlinkSync(SNAPSHOT.configPath);
+      ok(`Removed config file (didn't exist before installer ran)`);
+    }
+  }
+
+  // 2. Remove node_modules if we created it
+  if (SNAPSHOT.nodeModulesCreated && fs.existsSync(NODE_MODS)) {
+    fs.rmSync(NODE_MODS, { recursive: true, force: true });
+    ok(`Removed node_modules (didn't exist before installer ran)`);
+  }
+
+  // 3. Note about Ollama models — we deliberately do NOT remove them
+  console.log(DIM(`\n  Note: any Ollama models that were pulled are NOT removed —`));
+  console.log(DIM(`  they may be useful for other purposes. To remove manually:`));
+  console.log(DIM(`    ollama rm llama3.1:8b qwen2.5-coder:7b\n`));
+
+  if (SNAPSHOT.configBackupPath && fs.existsSync(SNAPSHOT.configBackupPath)) {
+    console.log(DIM(`  Backup of your original config is still at:`));
+    console.log(DIM(`    ${SNAPSHOT.configBackupPath}\n`));
+  }
+}
+
+// Hook Ctrl+C / kill signals
+let rolledBack = false;
+function panicAndExit(reason, code = 1) {
+  if (!rolledBack) {
+    rolledBack = true;
+    rollback(reason);
+  }
+  process.exit(code);
+}
+process.on("SIGINT",  () => panicAndExit("interrupted (Ctrl+C)", 130));
+process.on("SIGTERM", () => panicAndExit("terminated", 143));
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function getConfigPath() {
+  const platform = os.platform();
+  if (platform === "win32") return path.join(process.env.APPDATA || "", "Claude", "claude_desktop_config.json");
+  if (platform === "darwin") return path.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
+  return path.join(os.homedir(), ".config", "Claude", "claude_desktop_config.json");
+}
+
+async function isOllamaRunning() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 3000);
+    const res = await fetch("http://localhost:11434", { signal: ctrl.signal });
+    clearTimeout(t);
+    return res.status < 500;
+  } catch { return false; }
+}
+
+async function listOllamaModels() {
+  try {
+    const r = await fetch("http://localhost:11434/api/tags");
+    const d = await r.json();
+    return (d.models || []).map(m => m.name);
+  } catch { return []; }
+}
+
+// ── MAIN ──────────────────────────────────────────────────────────────────────
 console.log(BOLD("\n🔊 sonar-mcp installer\n"));
+console.log(DIM("  This installer will NOT touch your system without showing you a summary first."));
+console.log(DIM("  On any error or cancellation, all changes are rolled back automatically.\n"));
 
-// ── Step 1: Node.js version ───────────────────────────────────────────────────
-console.log(BOLD("Step 1/5 — Checking Node.js"));
-const nodeVer = process.versions.node.split(".").map(Number);
-if (nodeVer[0] < 18) fail(`Node.js 18+ required, found v${process.versions.node}. Download from https://nodejs.org`);
+try {
+
+// ── PRE-FLIGHT (read-only) ────────────────────────────────────────────────────
+head("Pre-flight checks (read-only)");
+
+// Node.js version
+const nodeMajor = Number(process.versions.node.split(".")[0]);
+if (nodeMajor < 18) {
+  console.log(RED(`  ✘ Node.js v${process.versions.node} is too old. Sonar requires Node 18 or later.`));
+  console.log("");
+  console.log("  What do you want to do?");
+  console.log(`    [1] Open ${BOLD("https://nodejs.org/en/download")} in your browser, then re-run this installer`);
+  console.log(`    [2] Cancel`);
+  const answer = await ask("  Choose [1/2]: ", "2");
+  if (answer === "1") {
+    const opener = os.platform() === "darwin" ? "open" : os.platform() === "win32" ? "start" : "xdg-open";
+    spawnSync(opener, ["https://nodejs.org/en/download"], { shell: true });
+    console.log("  Browser opened. Install Node 18+ and re-run this installer.");
+  }
+  panicAndExit("Node version unsupported", 1);
+}
 ok(`Node.js v${process.versions.node}`);
 
-// ── Step 2: npm install ───────────────────────────────────────────────────────
-console.log(BOLD("\nStep 2/5 — Installing npm dependencies"));
-const nmExists = fs.existsSync(path.join(__dirname, "node_modules", "@modelcontextprotocol"));
-if (nmExists) {
+// OS
+const supportedOs = ["win32", "darwin", "linux"];
+if (!supportedOs.includes(os.platform())) {
+  console.log(RED(`  ✘ Platform ${os.platform()} is not supported.`));
+  panicAndExit("Unsupported OS", 1);
+}
+ok(`Platform: ${os.platform()}`);
+
+// Ollama running?
+const ollamaUp = await isOllamaRunning();
+if (!ollamaUp) {
+  console.log(YELLOW(`  ⚠ Ollama is not running on http://localhost:11434`));
+  const plat = os.platform();
+  if (plat === "win32")  console.log("    Start it: Start menu → 'Ollama' → launch (look for the tray icon).");
+  else if (plat === "darwin") console.log("    Start it: open the Ollama app, or run 'ollama serve' in a terminal.");
+  else console.log("    Start it: run 'ollama serve' in a terminal.");
+  console.log("    If you haven't installed Ollama: https://ollama.com");
+  console.log("");
+  const ans = await ask("  Press Enter to retry, or type 'cancel' to exit: ", "");
+  if (ans === "cancel" || ans === "c") panicAndExit("Ollama not running, user cancelled", 0);
+  // Re-check once
+  if (!(await isOllamaRunning())) panicAndExit("Ollama still not running — install/start it and re-run", 1);
+}
+ok("Ollama is reachable on http://localhost:11434");
+
+// Config path
+const configPath = getConfigPath();
+const configExists = fs.existsSync(configPath);
+ok(`Claude Desktop config: ${configPath}${configExists ? "" : " (will be created)"}`);
+
+// ── PLAN SUMMARY ──────────────────────────────────────────────────────────────
+const existingModels = await listOllamaModels();
+const needPull = ["llama3.1:8b", "qwen2.5-coder:7b"].filter(m => !existingModels.includes(m));
+const needNpm  = !fs.existsSync(path.join(NODE_MODS, "@modelcontextprotocol"));
+
+head("Here's what this installer will do");
+const plan = [];
+if (needNpm) plan.push(`Run "npm install" (adds ./node_modules — reversible)`);
+else         plan.push(DIM(`Skip npm install (node_modules already present)`));
+
+if (needPull.length > 0) {
+  plan.push(`Pull ${needPull.length} Ollama model${needPull.length > 1 ? "s" : ""}: ${needPull.join(", ")} (~${needPull.length * 5}GB disk)`);
+} else {
+  plan.push(DIM(`Skip model pulls (both already present)`));
+}
+
+if (configExists) {
+  plan.push(`Add ONE entry ("ollama-local") to your existing claude_desktop_config.json — all other entries preserved, original backed up first`);
+} else {
+  plan.push(`Create a new claude_desktop_config.json with just the sonar-mcp entry`);
+}
+plan.push(`Verify the MCP server starts cleanly`);
+
+plan.forEach((p, i) => console.log(`  ${i + 1}. ${p}`));
+
+console.log(DIM(`\n  If anything goes wrong or you Ctrl+C, all changes will be rolled back.`));
+console.log(DIM(`  Ollama models pulled are kept (they're useful independently).`));
+
+const proceed = await ask(`\n  Proceed? [y/N] `, "n");
+if (proceed !== "y" && proceed !== "yes") {
+  console.log("\n  Cancelled. No changes were made.\n");
+  process.exit(0);
+}
+
+// ── SNAPSHOT BEFORE ANY WRITES ────────────────────────────────────────────────
+head("Taking snapshot for rollback safety");
+takeSnapshot(configPath);
+ok("Snapshot complete");
+
+// ── STEP 1: npm install ───────────────────────────────────────────────────────
+head("Step 1/4 — npm dependencies");
+if (!needNpm) {
   ok("node_modules already present — skipping");
 } else {
   info("Running npm install...");
   const r = spawnSync("npm", ["install"], { cwd: __dirname, stdio: "inherit", shell: true });
-  if (r.status !== 0) fail("npm install failed. Check the error above.");
+  if (r.status !== 0) panicAndExit("npm install failed", 1);
+  SNAPSHOT.nodeModulesCreated = true;
   ok("Dependencies installed");
 }
 
-// ── Step 3: Ollama ────────────────────────────────────────────────────────────
-console.log(BOLD("\nStep 3/5 — Checking Ollama"));
-
-let ollamaRunning = false;
-try {
-  const res = await fetch("http://localhost:11434");
-  ollamaRunning = res.ok || res.status === 200 || res.status < 500;
-} catch { /* not running */ }
-
-if (!ollamaRunning) {
-  warn("Ollama is not running on http://localhost:11434");
-  const plat = os.platform();
-  if (plat === "win32") {
-    info("To start it: open the Start menu → search for 'Ollama' → launch it (you should see");
-    info("    a llama icon in the system tray). Or download from https://ollama.com");
-  } else if (plat === "darwin") {
-    info("To start it: open the Ollama app from Applications (Cmd+Space → 'Ollama'), or run");
-    info("    'ollama serve' in a terminal. Install from https://ollama.com if missing.");
-  } else {
-    info("To start it: run 'ollama serve' in a terminal. Install from https://ollama.com if missing.");
-  }
-  warn("After starting Ollama, re-run this installer.");
-  warn("Skipping model pull — run manually after Ollama is up: ollama pull llama3.1:8b && ollama pull qwen2.5-coder:7b");
+// ── STEP 2: Pull Ollama models ────────────────────────────────────────────────
+head("Step 2/4 — Ollama models");
+if (needPull.length === 0) {
+  ok("Both models already pulled");
 } else {
-  ok("Ollama is running");
-
-  // Check which models are already present
-  let existingModels = [];
-  try {
-    const r   = await fetch("http://localhost:11434/api/tags");
-    const data = await r.json();
-    existingModels = (data.models || []).map(m => m.name);
-  } catch { /* ignore */ }
-
-  // Disk space heads-up if we're about to download anything
-  const needed = ["llama3.1:8b", "qwen2.5-coder:7b"].filter(m => !existingModels.includes(m));
-  if (needed.length > 0) {
-    info(`About to pull ${needed.length} model${needed.length > 1 ? "s" : ""} — needs ~${needed.length * 5}GB free disk space.`);
-  }
-
-  for (const model of ["llama3.1:8b", "qwen2.5-coder:7b"]) {
-    // Exact-tag match — "llama3.1:latest" must NOT satisfy "llama3.1:8b"
-    if (existingModels.includes(model)) {
-      ok(`${model} already pulled`);
-    } else {
-      info(`Pulling ${model} — this may take a few minutes...`);
-      const r = spawnSync("ollama", ["pull", model], { stdio: "inherit", shell: true });
-      if (r.status !== 0) warn(`Failed to pull ${model}. Run manually: ollama pull ${model}`);
-      else ok(`${model} pulled`);
-    }
+  info(`Pulling ${needPull.length} model${needPull.length > 1 ? "s" : ""} (~${needPull.length * 5}GB) — this may take several minutes.`);
+  for (const model of needPull) {
+    info(`Pulling ${model}...`);
+    const r = spawnSync("ollama", ["pull", model], { stdio: "inherit", shell: true });
+    if (r.status !== 0) panicAndExit(`Failed to pull ${model}`, 1);
+    ok(`${model} pulled`);
   }
 }
 
-// ── Step 4: Find Claude Desktop config ───────────────────────────────────────
-console.log(BOLD("\nStep 4/5 — Configuring Claude Desktop"));
+// ── STEP 3: Edit Claude Desktop config ────────────────────────────────────────
+head("Step 3/4 — Claude Desktop config");
 
-function getConfigPath() {
-  const platform = os.platform();
-  if (platform === "win32") {
-    return path.join(process.env.APPDATA || "", "Claude", "claude_desktop_config.json");
-  } else if (platform === "darwin") {
-    return path.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
-  } else {
-    return path.join(os.homedir(), ".config", "Claude", "claude_desktop_config.json");
-  }
-}
-
-const configPath = getConfigPath();
-info(`Config path: ${configPath}`);
-
-// Read or create config — refuse to clobber a broken file
 let config = {};
-if (fs.existsSync(configPath)) {
-  const raw = fs.readFileSync(configPath, "utf8");
+if (configExists) {
   try {
-    config = JSON.parse(raw);
-    ok("Found existing claude_desktop_config.json");
+    config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   } catch (e) {
-    // Back up the broken file before bailing so the user doesn't lose anything
-    const backup = `${configPath}.broken-${Date.now()}.bak`;
-    fs.copyFileSync(configPath, backup);
-    fail(
-      `Existing config file at ${configPath} is not valid JSON (${e.message}).\n` +
-      `  Backed up to: ${backup}\n` +
-      `  Fix the JSON manually (or delete the file to let this installer create a fresh one), then re-run.`
-    );
+    panicAndExit(`Existing config is not valid JSON (${e.message}). Fix it or delete it, then re-run.`, 1);
   }
 } else {
-  warn("Config file not found — creating it");
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
 }
 
-// Use absolute path to the Node binary currently running this installer.
-// On macOS, Claude Desktop launched from Spotlight/Launchpad has a minimal PATH
-// and may not find `node` (especially if installed via nvm/brew). The absolute
-// path bypasses that problem entirely.
-const NODE_PATH = process.execPath;
-
 if (!config.mcpServers) config.mcpServers = {};
-const existing = config.mcpServers["ollama-local"];
+const wasThere = !!config.mcpServers["ollama-local"];
 config.mcpServers["ollama-local"] = {
-  command: NODE_PATH,
+  command: process.execPath,
   args: [INDEX_JS],
   alwaysAllow: ["sonar", "sonar_stats"],
 };
 
-if (existing) ok("Updated existing ollama-local entry in mcpServers");
-else          ok("Added ollama-local to mcpServers");
-info(`Using Node at: ${NODE_PATH}`);
-
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-ok("Config saved");
+SNAPSHOT.configWasModified = true;
+ok(wasThere ? "Updated existing ollama-local entry" : "Added ollama-local entry");
+info(`Using Node at: ${process.execPath}`);
 
-// ── Step 5: Verify server starts ─────────────────────────────────────────────
-console.log(BOLD("\nStep 5/5 — Verifying MCP server"));
+// ── STEP 4: Verify server starts ──────────────────────────────────────────────
+head("Step 4/4 — Verify MCP server");
 info("Starting server for 3 seconds...");
-
-const child = spawnSync(
-  process.execPath,
-  [INDEX_JS],
-  { timeout: 3000, shell: false, encoding: "utf8" }
-);
-const output = (child.stderr || "") + (child.stdout || "");
-if (output.includes("[sonar] Ollama MCP server running")) {
+const child = spawnSync(process.execPath, [INDEX_JS], { timeout: 3000, shell: false, encoding: "utf8" });
+const out = (child.stderr || "") + (child.stdout || "");
+if (out.includes("[sonar] Ollama MCP server running")) {
   ok("Server starts successfully");
 } else {
-  warn("Could not confirm server startup — check index.js manually");
+  panicAndExit("Server did not report ready in 3 seconds — something is wrong with index.js", 1);
 }
 
-// ── Done ──────────────────────────────────────────────────────────────────────
-console.log(BOLD(GREEN("\n✅ sonar-mcp is installed!\n")));
-console.log("  Next step: " + BOLD("fully restart Claude Desktop") + " (quit from system tray, then reopen).");
-console.log("  Then in any conversation type:  " + BOLD("sonar <your question>") + "\n");
+// ── DONE ──────────────────────────────────────────────────────────────────────
+console.log("\n" + BOLD(GREEN("✅ sonar-mcp installed successfully!\n")));
+console.log("  Next: " + BOLD("fully restart Claude Desktop") + " (quit from system tray / menu bar, then reopen).");
+console.log("  Then in any conversation type: " + BOLD("sonar <your question>") + "\n");
+if (SNAPSHOT.configBackupPath) {
+  console.log(DIM(`  (Backup of your previous config: ${SNAPSHOT.configBackupPath})\n`));
+}
+
+} catch (err) {
+  console.log(RED(`\n✘ Unexpected error: ${err?.message ?? err}`));
+  panicAndExit("unexpected error", 1);
+}
