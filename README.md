@@ -207,6 +207,12 @@ The three routing paths (simple / coder / web) are clearly separated and easy to
 
 ---
 
+## 📜 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the version history.
+
+---
+
 ## 📄 License
 
 MIT
