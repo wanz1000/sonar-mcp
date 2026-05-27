@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-20
+
+### Added
+- **Vision route** — `sonar` now accepts an `image_path` parameter (local file or URL) and routes image questions to a vision model (`gemma3:12b` by default).
+- **Per-request model override** — `sonar` accepts an optional `model` parameter (`auto` / `simple` / `coder` / `vision` / `web`) to force a route instead of auto-classifying.
+- **Conversation memory** — `sonar` accepts an optional `use_history` flag that carries the last few exchanges as context for follow-up questions (depth set by `historyTurns`).
+- **`sonar_health`** tool — reports whether Ollama is reachable, which models are loaded in VRAM, and whether every configured model is pulled.
+- **Cost-savings estimate** — `sonar_stats` now shows the estimated Claude API dollar cost avoided, using configurable input/output token rates.
+- **Configuration file** — an optional `sonar.config.json` (see `sonar.config.example.json`) overrides models, Ollama URL, search provider, pricing, and history depth without editing code. It is git-ignored so settings survive updates.
+- **Multi-engine web search** — the web route now queries several engines *in parallel* (DuckDuckGo HTML, DuckDuckGo Lite, Wikipedia, DuckDuckGo Instant Answers, and optionally SearXNG), then merges and de-duplicates results by URL. If an engine is down, rate-limited, or returns junk, the others still answer. Engines are selectable via `search.engines`.
+
+### Changed
+- `askOllama` now surfaces Ollama's `error` field as a real exception so failures map to friendly messages.
+- `friendlyError` recognizes more failure modes: generic CUDA errors, runner-process crashes, and `memory layout cannot be allocated`.
+- Search config replaced `search.provider` with `search.engines` (array) — engines run together rather than one-with-fallback.
+
 ## [1.0.0] - 2026-05-19
 
 ### Added
@@ -21,4 +37,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Infinite recursion in the `fetchWithTimeout` wrapper that caused every `sonar` call to fail with `Maximum call stack size exceeded`. The timeout wrapper was accidentally calling itself instead of the underlying `fetch`.
 
+[1.1.0]: https://github.com/wanz1000/sonar-mcp/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/wanz1000/sonar-mcp/releases/tag/v1.0.0

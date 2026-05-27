@@ -2,6 +2,17 @@
 
 A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop** to local **Ollama** models. One tool — `sonar` — automatically routes every prompt to the right model, including live web search when needed. Free, fast, and runs entirely on your GPU.
 
+> 🎉 **New in v1.1.0**
+> - 👁️ **Vision route** — ask about images by passing `image_path` (routed to `gemma3:12b`)
+> - 🌐 **Multi-engine web search** — DuckDuckGo, DuckDuckGo Lite, Wikipedia & Instant Answers queried *in parallel*, merged and de-duplicated; one engine failing no longer breaks search
+> - 🧠 **Conversation memory** — pass `use_history` to let sonar remember earlier turns
+> - 🎛️ **Per-request model override** — force a route with the `model` parameter
+> - 🩺 **`sonar_health` tool** — check Ollama status and which models are ready
+> - 💵 **Cost-savings estimate** — `sonar_stats` now shows the Claude API spend you've avoided
+> - ⚙️ **Config file** — `sonar.config.json` overrides models, search engines, pricing & more
+>
+> See the [changelog](CHANGELOG.md) for full details.
+
 > **⚠️ Claude subscription required.** Sonar is designed to offload work from Claude to free local models, reducing token consumption. You need an active [Claude Pro or Team subscription](https://claude.ai/upgrade) with Claude Desktop to use it.
 
 ---
@@ -13,13 +24,22 @@ A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop
   |---|---|
   | General tasks (explain, summarize, translate, draft…) | `llama3.1:8b` |
   | Coding tasks (write, debug, refactor, algorithms…) | `qwen2.5-coder:7b` |
-  | Live/current info (news, weather, prices, URLs…) | DuckDuckGo → `llama3.1:8b` |
+  | Image questions (pass `image_path`) | `gemma3:12b` |
+  | Live/current info (news, weather, prices, URLs…) | Multi-engine web search → `llama3.1:8b` |
 
-- **`sonar_stats` tool** — see how many tokens you've processed locally, broken down by today / week / month / year.
+- **Optional manual control** — override the route (`model`), attach an image (`image_path`), or carry context across calls (`use_history`). See [Usage](#-usage).
 
-- **VRAM-safe** — `keep_alive: 0` unloads each model immediately after a call so two models never compete for VRAM at the same time.
+- **`sonar_stats` tool** — tokens processed locally *and* the estimated Claude API cost saved, by today / week / month / year.
 
-- **No API keys required** — DuckDuckGo search uses the public HTML endpoint.
+- **`sonar_health` tool** — checks Ollama is reachable, shows what's loaded in VRAM, and verifies every configured model is pulled.
+
+- **Configurable** — an optional [`sonar.config.json`](#-configuration) overrides models, search provider, pricing, and history depth without editing code.
+
+- **Robust multi-engine search** — the web route queries several search engines *in parallel* (DuckDuckGo, DuckDuckGo Lite, Wikipedia, DuckDuckGo Instant Answers, and optionally SearXNG), merges and de-duplicates the results. If one engine is down or rate-limited, the others still answer.
+
+- **VRAM-safe** — `keep_alive: 0` unloads each model immediately after a call so models never compete for VRAM.
+
+- **No API keys required** — every search engine used works without an API key (SearXNG optional, self-hosted).
 
 ---
 
@@ -116,7 +136,7 @@ Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your
     "ollama-local": {
       "command": "node",
       "args": ["ABSOLUTE_PATH/index.js"],
-      "alwaysAllow": ["sonar", "sonar_stats"]
+      "alwaysAllow": ["sonar", "sonar_stats", "sonar_health"]
     }
   }
 }
@@ -167,9 +187,10 @@ sonar write a Go function to parse JSON
 sonar what are the latest AI news headlines?
 sonar summarize https://example.com/article
 sonar_stats
+sonar_health
 ```
 
-Sonar will route it to the right model (or fetch the web) and return the answer — no confirmation prompts needed. The result shows which model handled it, for example:
+Sonar routes it automatically and returns the answer — no confirmation prompts. The result shows which model handled it:
 
 ```
 [routed to llama3.1:8b]
@@ -177,33 +198,74 @@ Sonar will route it to the right model (or fetch the web) and return the answer 
 Transformers are a neural network architecture...
 ```
 
+### Optional parameters
+
+`sonar` accepts three optional parameters alongside `prompt`:
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `model` | `auto` \| `simple` \| `coder` \| `vision` \| `web` | Force a route instead of auto-classifying. Default `auto`. |
+| `image_path` | string | Local file path or URL of an image — routes to the vision model. |
+| `use_history` | boolean | Carry the last few sonar exchanges as context for follow-up questions. Default `false`. |
+
+Examples in natural language:
+
+```
+sonar describe this image — image_path C:\photos\chart.png
+sonar (force coder) refactor this loop into a list comprehension
+sonar remember my project is called Apollo, then in a follow-up: what's my project called?  (use_history)
+```
+
 ---
 
-## 🗂 Token stats
+## 🗂 Token stats & savings
 
-`token-stats.json` is created automatically next to `index.js` and updated after every call. It tracks prompt tokens + completion tokens per calendar day.
+`token-stats.json` is created automatically next to `index.js` and updated after every call.
 
-Ask `sonar_stats` any time to see your totals:
+Ask `sonar_stats` any time to see your totals and the estimated Claude API cost avoided:
 
 ```
-📊 Sonar Token Usage (processed locally)
+📊 Sonar Token Usage (processed locally)   sonar-mcp v1.0.0
 
-  Today   : 1,240 tokens across 6 requests
-  Week    : 8,430 tokens across 41 requests
-  Month   : 31,200 tokens across 158 requests
-  Year    : 31,200 tokens across 158 requests
+  Today   : 1,240 tokens across 6 requests  (~$0.04 saved)
+  Week    : 8,430 tokens across 41 requests  (~$0.21 saved)
+  Month   : 31,200 tokens across 158 requests  (~$0.78 saved)
+  Year    : 31,200 tokens across 158 requests  (~$0.78 saved)
 ```
+
+The dollar estimate uses the rates in `sonar.config.json` (default $3/M input, $15/M output).
+
+---
+
+## ⚙️ Configuration
+
+All settings have built-in defaults — sonar works with no config file. To customize, copy the example:
+
+```bash
+cp sonar.config.example.json sonar.config.json
+```
+
+`sonar.config.json` is git-ignored, so your settings survive `npm run update`. Keys (all optional):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `ollamaUrl` | `http://localhost:11434` | Where Ollama is reachable |
+| `models.simple` | `llama3.1:8b` | General-task model |
+| `models.coder` | `qwen2.5-coder:7b` | Coding model |
+| `models.vision` | `gemma3:12b` | Image/vision model |
+| `search.engines` | all | Array of engines to query in parallel: `duckduckgo`, `duckduckgo-lite`, `wikipedia`, `ddg-instant`, `searxng` |
+| `search.searxngUrl` | `""` | Your SearXNG instance URL — enables the `searxng` engine |
+| `pricing.inputPerMillion` | `3.0` | Claude input price used for the savings estimate |
+| `pricing.outputPerMillion` | `15.0` | Claude output price used for the savings estimate |
+| `historyTurns` | `3` | How many prior exchanges `use_history` keeps |
+
+Run `sonar_health` after changing config to confirm the new models are pulled and ready.
 
 ---
 
 ## 🛠 Customization
 
-Open `index.js` to:
-- **Swap models** — change `MODELS.simple` or `MODELS.coder` to any model you have pulled in Ollama
-- **Tune the web keyword list** — add terms to `WEB_KEYWORDS` to expand what triggers a live search
-- **Adjust context size** — modify the `fetchUrl` character limit to send more or less page content to the model
-
-The three routing paths (simple / coder / web) are clearly separated and easy to extend.
+Beyond `sonar.config.json`, open `index.js` to tune the `WEB_KEYWORDS` list (what triggers a live search) or the `fetchUrl` character limit (how much page content is sent to the model). The routing paths (simple / coder / vision / web) are clearly separated and easy to extend.
 
 ---
 

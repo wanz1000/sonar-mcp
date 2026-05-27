@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy this file to sonar.config.json to override defaults. All keys are optional.",
+  "ollamaUrl": "http://localhost:11434",
+  "models": {
+    "simple": "llama3.1:8b",
+    "coder": "qwen2.5-coder:7b",
+    "vision": "gemma3:12b"
+  },
+  "search": {
+    "_comment": "engines run in parallel and results are merged. searxng is skipped unless searxngUrl is set.",
+    "engines": ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"],
+    "searxngUrl": ""
+  },
+  "pricing": {
+    "inputPerMillion": 3.0,
+    "outputPerMillion": 15.0
+  },
+  "historyTurns": 3
+}

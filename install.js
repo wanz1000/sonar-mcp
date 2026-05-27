@@ -384,7 +384,7 @@ const wasThere = !!config.mcpServers["ollama-local"];
 config.mcpServers["ollama-local"] = {
   command: process.execPath,
   args: [INDEX_JS],
-  alwaysAllow: ["sonar", "sonar_stats"],
+  alwaysAllow: ["sonar", "sonar_stats", "sonar_health"],
 };
 
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));

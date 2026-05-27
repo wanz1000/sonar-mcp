@@ -8,17 +8,135 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const STATS_FILE = path.join(__dirname, "token-stats.json");
+const CONFIG_FILE = path.join(__dirname, "sonar.config.json");
 const PKG        = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
 const VERSION    = PKG.version;
 
-const OLLAMA_CHAT_URL = "http://localhost:11434/api/chat";
-const MODELS = {
-  simple: "llama3.1:8b",
-  coder:  "qwen2.5-coder:7b",
+// ── Config ────────────────────────────────────────────────────────────────────
+// Built-in defaults. An optional sonar.config.json overrides any of these keys.
+const DEFAULT_CONFIG = {
+  ollamaUrl: "http://localhost:11434",
+  models: {
+    simple: "llama3.1:8b",
+    coder:  "qwen2.5-coder:7b",
+    vision: "gemma3:12b",
+  },
+  autoSelectModels: true,       // pick the best locally-available model per role based on GPU VRAM
+  numCtx: 4096,                 // context window tokens — lower = less VRAM (KV cache scales with this)
+  useMmap: true,                // memory-map model weights instead of malloc — reduces commit charge
+  search: {
+    // Which engines to query in parallel. Omit / empty = all available.
+    // Valid: "duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"
+    engines:    ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"],
+    searxngUrl: "",             // e.g. "http://localhost:8888" — enables the searxng engine
+  },
+  pricing: {
+    // Rough Claude API list prices (USD per million tokens) for the savings estimate.
+    inputPerMillion:  3.0,
+    outputPerMillion: 15.0,
+  },
+  historyTurns: 3,              // how many prior exchanges to keep when use_history is on
 };
+
+// Known VRAM budgets per model (GiB, rough Q4 estimate including weights + KV at numCtx=4096)
+const MODEL_VRAM_GB = {
+  "llama3.2:1b":          1,
+  "llama3.2:3b":          2,
+  "gemma3:4b":            3,
+  "llama3.1:8b":          5,
+  "llama3.3:8b":          5,
+  "mistral:7b":           5,
+  "qwen2.5:7b":           5,
+  "qwen2.5-coder:7b":     5,
+  "deepseek-r1:7b":       5,
+  "gemma3:12b":           8,
+  "qwen2.5-coder:14b":    9,
+  "deepseek-r1:14b":      9,
+  "gemma3:27b":          17,
+  "qwen2.5-coder:32b":   20,
+};
+
+// Best-to-worst model preference per role — first locally available model that fits in VRAM wins
+const ROLE_PREFERENCES = {
+  simple: ["gemma3:27b", "gemma3:12b", "llama3.1:8b", "llama3.3:8b", "mistral:7b", "qwen2.5:7b", "llama3.2:3b", "llama3.2:1b"],
+  coder:  ["qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-r1:14b", "qwen2.5-coder:7b", "deepseek-r1:7b"],
+  vision: ["gemma3:27b", "gemma3:12b"],
+};
+
+function loadConfig() {
+  if (!fs.existsSync(CONFIG_FILE)) return DEFAULT_CONFIG;
+  try {
+    const u = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+    return {
+      ...DEFAULT_CONFIG, ...u,
+      models:           { ...DEFAULT_CONFIG.models,  ...(u.models  || {}) },
+      search:           { ...DEFAULT_CONFIG.search,  ...(u.search  || {}) },
+      pricing:          { ...DEFAULT_CONFIG.pricing, ...(u.pricing || {}) },
+      numCtx:           u.numCtx           ?? DEFAULT_CONFIG.numCtx,
+      useMmap:          u.useMmap          ?? DEFAULT_CONFIG.useMmap,
+      autoSelectModels: u.autoSelectModels ?? DEFAULT_CONFIG.autoSelectModels,
+    };
+  } catch (e) {
+    console.error(`[sonar] sonar.config.json is invalid (${e.message}) — using defaults`);
+    return DEFAULT_CONFIG;
+  }
+}
+
+const CONFIG          = loadConfig();
+const OLLAMA_BASE     = CONFIG.ollamaUrl.replace(/\/$/, "");
+const OLLAMA_CHAT_URL = `${OLLAMA_BASE}/api/chat`;
+
+// Returns free VRAM in GiB, with a safety margin applied. Falls back to Infinity.
+function getFreeVramGB() {
+  try {
+    const out = execSync(
+      "nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits",
+      { timeout: 5000, encoding: "utf8" }
+    ).trim();
+    const mb = parseInt(out.split("\n")[0], 10);
+    if (!isNaN(mb)) return Math.floor((mb / 1024) * 0.85); // 85% of free VRAM as usable budget
+  } catch { /* nvidia-smi unavailable or non-NVIDIA GPU */ }
+  return Infinity;
+}
+
+// Resolves the best model for each role given locally available models and free VRAM.
+// Falls back to CONFIG.models entries if auto-select is off or no candidates fit.
+async function resolveModels() {
+  if (!CONFIG.autoSelectModels) return { ...CONFIG.models };
+
+  let localModels = new Set();
+  try {
+    const res = await fetch(`${OLLAMA_BASE}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    localModels = new Set(((await res.json()).models || []).map(m => m.name));
+  } catch {
+    console.error("[sonar] auto-select: Ollama unreachable at startup — using config models");
+    return { ...CONFIG.models };
+  }
+
+  const vramGB = getFreeVramGB();
+  console.error(`[sonar] auto-select: ${vramGB === Infinity ? "unlimited" : vramGB + " GiB"} VRAM budget, ${localModels.size} local models`);
+
+  const resolved = { ...CONFIG.models };
+  for (const [role, prefs] of Object.entries(ROLE_PREFERENCES)) {
+    for (const model of prefs) {
+      if (!localModels.has(model)) continue;
+      const needed = MODEL_VRAM_GB[model] ?? Infinity;
+      if (needed <= vramGB) {
+        resolved[role] = model;
+        console.error(`[sonar] auto-select: ${role} → ${model} (~${needed} GiB)`);
+        break;
+      }
+    }
+  }
+  return resolved;
+}
+
+// Resolved at startup — set below before server.connect()
+let MODELS = CONFIG.models;
 
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -27,7 +145,7 @@ const BROWSER_UA =
 // Wrap fetch with an AbortController so a hung Ollama or web request can't freeze
 // the MCP server (and therefore Claude Desktop) indefinitely.
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 120000) {
-  const ctrl = new AbortController();
+  const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     return await fetch(url, { ...opts, signal: ctrl.signal });
@@ -49,9 +167,9 @@ function saveTokens(promptTokens, completionTokens) {
   const now   = new Date();
   const today = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
   if (!stats[today]) stats[today] = { promptTokens: 0, completionTokens: 0, requests: 0 };
-  stats[today].promptTokens    += promptTokens;
+  stats[today].promptTokens     += promptTokens;
   stats[today].completionTokens += completionTokens;
-  stats[today].requests        += 1;
+  stats[today].requests         += 1;
   fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2));
 }
 
@@ -74,16 +192,24 @@ function aggregateStats() {
     totals[label] = { promptTokens: 0, completionTokens: 0, requests: 0 };
     for (const [dateStr, entry] of Object.entries(stats)) {
       if (dateStr >= since) {
-        totals[label].promptTokens    += entry.promptTokens;
+        totals[label].promptTokens     += entry.promptTokens;
         totals[label].completionTokens += entry.completionTokens;
-        totals[label].requests        += entry.requests;
+        totals[label].requests         += entry.requests;
       }
     }
   }
 
+  // Estimated $ that would have been spent on the Claude API for the same tokens.
+  const estCost = (t) => {
+    const inUsd  = (t.promptTokens     / 1e6) * CONFIG.pricing.inputPerMillion;
+    const outUsd = (t.completionTokens / 1e6) * CONFIG.pricing.outputPerMillion;
+    return inUsd + outUsd;
+  };
+
   const fmt = (t) => {
     const total = t.promptTokens + t.completionTokens;
-    return `${total.toLocaleString()} tokens (${t.promptTokens.toLocaleString()} prompt + ${t.completionTokens.toLocaleString()} completion) across ${t.requests} request${t.requests !== 1 ? "s" : ""}`;
+    return `${total.toLocaleString()} tokens across ${t.requests} request${t.requests !== 1 ? "s" : ""}` +
+           `  (~$${estCost(t).toFixed(2)} saved)`;
   };
 
   return [
@@ -94,6 +220,8 @@ function aggregateStats() {
     `  Month   : ${fmt(totals.month)}`,
     `  Year    : ${fmt(totals.year)}`,
     ``,
+    `  Savings estimated at $${CONFIG.pricing.inputPerMillion}/M input + ` +
+      `$${CONFIG.pricing.outputPerMillion}/M output (editable in sonar.config.json).`,
     `  To update: run "npm run update" in the sonar-mcp folder.`,
   ].join("\n");
 }
@@ -121,71 +249,218 @@ async function fetchUrl(url) {
   const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 15000);
   const html = await res.text();
   const text = stripHtml(html);
-  // Trim to ~6 000 chars so the model context doesn't explode
   return text.length > 6000 ? text.slice(0, 6000) + "\n…[truncated]" : text;
 }
 
-async function webSearch(query) {
-  console.error(`[sonar/web] searching DuckDuckGo: ${query}`);
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 15000);
+// ── Multi-engine web search ───────────────────────────────────────────────────
+// Each engine returns an array of { title, snippet, url } (or [] / throws).
+// multiSearch runs them all in PARALLEL — one engine being down, rate-limited,
+// or returning junk no longer breaks the web route. Results are merged and
+// de-duplicated by URL.
+
+function decodeDdgHref(href) {
+  // DDG redirect links look like //duckduckgo.com/l/?uddg=<encoded real url>
+  try {
+    const m = href.match(/[?&]uddg=([^&]+)/);
+    if (m) return decodeURIComponent(m[1]);
+  } catch { /* fall through */ }
+  return href.startsWith("//") ? "https:" + href : href;
+}
+
+// Engine 1 — DuckDuckGo HTML endpoint
+async function engineDuckDuckGo(query) {
+  const url  = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 12000);
   const html = await res.text();
-
-  // Pull result links + snippets from DDG HTML response
-  const snippetRe = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
   const titleRe   = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  const titleMatches = [...html.matchAll(titleRe)].slice(0, 5);
-  const snippets     = [...html.matchAll(snippetRe)].slice(0, 5).map(m => stripHtml(m[1]));
+  const snippetRe = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  const titles    = [...html.matchAll(titleRe)].slice(0, 5);
+  const snippets  = [...html.matchAll(snippetRe)].slice(0, 5).map(m => stripHtml(m[1]));
+  return titles.map((m, i) => ({
+    title:   stripHtml(m[2]),
+    snippet: snippets[i] || "",
+    url:     decodeDdgHref(m[1]),
+  }));
+}
 
-  if (titleMatches.length === 0) return "No search results found.";
+// Engine 2 — DuckDuckGo Lite (different layout; often succeeds when HTML doesn't)
+async function engineDuckDuckGoLite(query) {
+  const url  = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 12000);
+  const html = await res.text();
+  // DDG Lite puts href before class and uses single-quoted class attributes
+  const linkRe    = /<a[^>]*href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRe = /<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
+  const links     = [...html.matchAll(linkRe)].slice(0, 5);
+  const snippets  = [...html.matchAll(snippetRe)].slice(0, 5).map(m => stripHtml(m[1]));
+  return links.map((m, i) => ({
+    title:   stripHtml(m[2]),
+    snippet: snippets[i] || "",
+    url:     decodeDdgHref(m[1]),
+  }));
+}
 
-  const titles = titleMatches.map(m => stripHtml(m[2]));
-  const hrefs  = titleMatches.map(m => m[1]);
+// Engine 3 — Wikipedia search API (very reliable for factual / definitional queries)
+async function engineWikipedia(query) {
+  const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=3` +
+              `&srsearch=${encodeURIComponent(query)}`;
+  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 12000);
+  const data = await res.json();
+  return (data?.query?.search || []).map(r => ({
+    title:   r.title,
+    snippet: stripHtml(r.snippet || ""),
+    url:     `https://en.wikipedia.org/wiki/${encodeURIComponent(r.title.replace(/ /g, "_"))}`,
+  }));
+}
 
-  // Build snippet summary
-  const summary = titles
-    .map((t, i) => `[${i + 1}] ${t}\n${snippets[i] ?? ""}`)
-    .join("\n\n");
+// Engine 4 — DuckDuckGo Instant Answer API (structured abstracts / definitions)
+async function engineDdgInstant(query) {
+  const url  = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 12000);
+  const data = await res.json();
+  const out  = [];
+  if (data.AbstractText) {
+    out.push({ title: data.Heading || query, snippet: data.AbstractText, url: data.AbstractURL || "" });
+  }
+  if (data.Answer)     out.push({ title: "Direct answer", snippet: String(data.Answer), url: "" });
+  if (data.Definition) out.push({ title: data.Heading || "Definition", snippet: data.Definition, url: data.DefinitionURL || "" });
+  for (const t of (data.RelatedTopics || []).slice(0, 3)) {
+    if (t?.Text) out.push({ title: "Related", snippet: t.Text, url: t.FirstURL || "" });
+  }
+  return out;
+}
 
-  // If snippets are thin, fetch the first URL that looks like an actual article
-  // (has a path with at least one slug segment, not just a homepage)
-  const totalSnippetLen = snippets.join("").length;
-  if (totalSnippetLen < 300) {
-    const articleUrl = hrefs.find(h => {
+// Engine 5 — SearXNG (self-hosted meta-search) — only if a URL is configured
+async function engineSearxng(query) {
+  const base = (CONFIG.search.searxngUrl || "").replace(/\/$/, "");
+  if (!base) return [];
+  const url  = `${base}/search?q=${encodeURIComponent(query)}&format=json`;
+  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 12000);
+  const data = await res.json();
+  return (data.results || []).slice(0, 5).map(r => ({
+    title:   r.title || "",
+    snippet: r.content || "",
+    url:     r.url || "",
+  }));
+}
+
+const ALL_ENGINES = {
+  "duckduckgo":      engineDuckDuckGo,
+  "duckduckgo-lite": engineDuckDuckGoLite,
+  "wikipedia":       engineWikipedia,
+  "ddg-instant":     engineDdgInstant,
+  "searxng":         engineSearxng,
+};
+
+function normalizeUrl(u) {
+  return (u || "").toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "");
+}
+
+// Run every configured engine in parallel, aggregate + dedupe.
+// Returns { text, used, total }.
+async function multiSearch(query) {
+  // Which engines to run: config.search.engines, or all (searxng only if URL set)
+  let engineNames = Array.isArray(CONFIG.search.engines) && CONFIG.search.engines.length
+    ? CONFIG.search.engines.filter(n => ALL_ENGINES[n])
+    : ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"];
+  if (!CONFIG.search.searxngUrl) engineNames = engineNames.filter(n => n !== "searxng");
+
+  console.error(`[sonar/web] multi-engine search (${engineNames.join(", ")}): ${query}`);
+  const settled = await Promise.allSettled(engineNames.map(n => ALL_ENGINES[n](query)));
+
+  const seen     = new Set();
+  const sections = [];
+  const urls     = [];
+  let used = 0;
+
+  settled.forEach((r, i) => {
+    const name = engineNames[i];
+    if (r.status !== "fulfilled" || !Array.isArray(r.value) || r.value.length === 0) {
+      console.error(`[sonar/web] ${name}: ${r.status === "rejected" ? r.reason?.message : "no results"}`);
+      return;
+    }
+    const lines = [];
+    for (const item of r.value) {
+      const key = normalizeUrl(item.url) || item.title?.toLowerCase();
+      if (key && seen.has(key)) continue;       // dedupe across engines
+      if (key) seen.add(key);
+      if (item.url) urls.push(item.url);
+      lines.push(`- ${item.title}${item.url ? ` <${item.url}>` : ""}\n  ${item.snippet || ""}`.trim());
+    }
+    if (lines.length) {
+      used++;
+      sections.push(`[${name}]\n${lines.join("\n")}`);
+    }
+  });
+
+  if (sections.length === 0) {
+    return { text: "No search results found from any engine.", used: 0, total: engineNames.length };
+  }
+
+  let text = sections.join("\n\n");
+
+  // If the aggregated snippets are thin, fetch the first real article for depth.
+  if (text.length < 600) {
+    const articleUrl = urls.find(h => {
       try {
         const u = new URL(h);
-        // Must have a meaningful path (more than just "/") and no query-only paths
         return u.pathname.length > 8 && u.pathname.split("/").filter(Boolean).length >= 1;
       } catch { return false; }
     });
     if (articleUrl) {
       try {
-        console.error(`[sonar/web] snippets thin — fetching article: ${articleUrl}`);
         const article = await fetchUrl(articleUrl);
-        return `Search results:\n${summary}\n\n--- Article content (${articleUrl}) ---\n${article}`;
+        text += `\n\n--- Full article (${articleUrl}) ---\n${article}`;
       } catch (e) {
         console.error(`[sonar/web] article fetch failed: ${e.message}`);
       }
     }
   }
 
-  return summary;
+  return { text, used, total: engineNames.length };
 }
 
-// ── Ollama calls ──────────────────────────────────────────────────────────────
+// ── Image loading (for the vision route) ──────────────────────────────────────
 
-async function askOllama(model, prompt) {
-  const res  = await fetchWithTimeout(OLLAMA_CHAT_URL, {
+// Accepts a local file path, an http(s) URL, or a raw base64 string.
+// Returns a base64 string (no data: prefix) as Ollama expects.
+async function loadImageBase64(imageRef) {
+  if (/^https?:\/\//i.test(imageRef)) {
+    const res = await fetchWithTimeout(imageRef, {}, 15000);
+    const buf = Buffer.from(await res.arrayBuffer());
+    return buf.toString("base64");
+  }
+  if (fs.existsSync(imageRef)) {
+    return fs.readFileSync(imageRef).toString("base64");
+  }
+  // Assume it's already base64; strip any data: URI prefix
+  return imageRef.replace(/^data:image\/[a-z]+;base64,/i, "");
+}
+
+// ── Conversation memory (in-process, opt-in) ──────────────────────────────────
+
+let history = [];   // [{ role, content }, ...]
+
+function pushHistory(userText, assistantText) {
+  history.push({ role: "user", content: userText });
+  history.push({ role: "assistant", content: assistantText });
+  const max = CONFIG.historyTurns * 2;
+  if (history.length > max) history = history.slice(history.length - max);
+}
+
+// ── Ollama call ───────────────────────────────────────────────────────────────
+
+// messages: array of {role, content, images?}
+async function askOllama(model, messages) {
+  const res = await fetchWithTimeout(OLLAMA_CHAT_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      stream: false,
-      keep_alive: 0,
-    }),
+    body: JSON.stringify({ model, messages, stream: false, keep_alive: 0, options: { num_ctx: CONFIG.numCtx, use_mmap: CONFIG.useMmap } }),
   });
   const data = await res.json();
+  // Ollama returns { error: "..." } on failure — surface it so friendlyError can map it
+  if (data.error) throw new Error(data.error);
+  if (!data.message) throw new Error("Ollama returned no message");
   return {
     content:          data.message.content,
     promptTokens:     data.prompt_eval_count ?? 0,
@@ -193,19 +468,21 @@ async function askOllama(model, prompt) {
   };
 }
 
-// ── Three-way router ──────────────────────────────────────────────────────────
+// Convenience: single-prompt call
+async function askOllamaSimple(model, prompt) {
+  return askOllama(model, [{ role: "user", content: prompt }]);
+}
 
-// Fast keyword pre-check — catches obvious web queries without burning LLM tokens
-const WEB_KEYWORDS = /\b(today|tonight|right now|right now|this week|this month|latest|current|news|headline|weather|temperature|forecast|price|cost|stock|score|standings|who won|what happened|trending|breaking|recent|live|2025|2026|is \w+ open|hours of)\b/i;
+// ── Router ────────────────────────────────────────────────────────────────────
+
+const WEB_KEYWORDS = /\b(today|tonight|right now|this week|this month|latest|current|news|headline|weather|temperature|forecast|price|cost|stock|score|standings|who won|what happened|trending|breaking|recent|live|2025|2026|is \w+ open|hours of)\b/i;
 
 async function classifyPrompt(prompt) {
-  // Fast path: URL in prompt or keyword match → always web
   if (extractUrl(prompt) || WEB_KEYWORDS.test(prompt)) {
     console.error(`[sonar] fast-classified as: web (keyword/URL match)`);
     return "web";
   }
 
-  // LLM path for ambiguous prompts
   const routerPrompt =
     `You are a routing classifier. Output ONLY one of three words: "simple", "coder", or "web".\n\n` +
     `Rules:\n` +
@@ -223,7 +500,7 @@ async function classifyPrompt(prompt) {
     `"debug this React component"             => coder\n\n` +
     `Prompt to classify: ${prompt}\n\nAnswer:`;
 
-  const { content, promptTokens, completionTokens } = await askOllama(MODELS.simple, routerPrompt);
+  const { content, promptTokens, completionTokens } = await askOllamaSimple(MODELS.simple, routerPrompt);
   saveTokens(promptTokens, completionTokens);
   const trimmed = content.trim().toLowerCase();
   let chosen = "simple";
@@ -231,6 +508,55 @@ async function classifyPrompt(prompt) {
   else if (trimmed.startsWith("web")) chosen = "web";
   console.error(`[sonar] classified as: ${chosen} (raw: "${trimmed}")`);
   return chosen;
+}
+
+// ── Health check ──────────────────────────────────────────────────────────────
+
+async function healthCheck() {
+  const lines = [`🩺 Sonar Health   sonar-mcp v${VERSION}`, ``];
+
+  let reachable = false;
+  let loaded = [];
+  let available = [];
+
+  try {
+    const ps = await fetchWithTimeout(`${OLLAMA_BASE}/api/ps`, {}, 5000);
+    loaded = (await ps.json()).models || [];
+    reachable = true;
+  } catch { /* not reachable */ }
+
+  if (reachable) {
+    try {
+      const tags = await fetchWithTimeout(`${OLLAMA_BASE}/api/tags`, {}, 5000);
+      available = ((await tags.json()).models || []).map(m => m.name);
+    } catch { /* ignore */ }
+  }
+
+  lines.push(`  Ollama   : ${reachable ? "✅ reachable" : "❌ NOT reachable"} at ${OLLAMA_BASE}`);
+
+  if (!reachable) {
+    lines.push(``);
+    lines.push(`  Start the Ollama app (Windows tray icon / macOS menu bar) and retry.`);
+    return lines.join("\n");
+  }
+
+  lines.push(`  Loaded   : ${loaded.length ? loaded.map(m => m.name).join(", ") : "(none currently in VRAM)"}`);
+  lines.push(``);
+  lines.push(`  Configured models:`);
+  for (const [role, model] of Object.entries(MODELS)) {
+    const present = available.includes(model);
+    const tag = present ? "✅ available" : `⚠️  not pulled — run: ollama pull ${model}`;
+    lines.push(`    ${role.padEnd(7)}: ${model.padEnd(20)} ${tag}`);
+  }
+  lines.push(``);
+  let engs = Array.isArray(CONFIG.search.engines) && CONFIG.search.engines.length
+    ? [...CONFIG.search.engines]
+    : ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"];
+  if (!CONFIG.search.searxngUrl) engs = engs.filter(n => n !== "searxng");
+  lines.push(`  Search   : ${engs.length} engine(s) — ${engs.join(", ")}` +
+             (CONFIG.search.searxngUrl ? `  (searxng: ${CONFIG.search.searxngUrl})` : ""));
+  lines.push(`  History  : keeps last ${CONFIG.historyTurns} exchange(s) when use_history is on`);
+  return lines.join("\n");
 }
 
 // ── MCP server ────────────────────────────────────────────────────────────────
@@ -245,16 +571,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "sonar",
       description:
-        "Send any task or question to the local Ollama models running on the RTX 3090 Ti. " +
-        "Sonar automatically routes the prompt to the best local model and fetches live web data when needed: " +
-        "• llama3.1:8b for general tasks (summarizing, describing, translating, classifying, drafting, explaining) " +
-        "• qwen2.5-coder:7b for coding tasks (writing code, debugging, refactoring, algorithms, scripts) " +
-        "• DuckDuckGo search + llama3.1:8b for live/current information (news, weather, prices, URLs) " +
-        "Use for any task — it is free and fast.",
+        "Send any task or question to the local Ollama models. Sonar auto-routes to the best model " +
+        "and fetches live web data when needed: " +
+        `• ${MODELS.simple} for general tasks (summarizing, describing, translating, drafting, explaining) ` +
+        `• ${MODELS.coder} for coding tasks (writing code, debugging, refactoring, algorithms) ` +
+        `• ${MODELS.vision} for image questions (pass image_path) ` +
+        "• web search for live/current information (news, weather, prices, URLs). " +
+        "Free and fast — runs locally.",
       inputSchema: {
         type: "object",
         properties: {
-          prompt: { type: "string", description: "The task, question, or URL to process." },
+          prompt: {
+            type: "string",
+            description: "The task, question, or URL to process.",
+          },
+          model: {
+            type: "string",
+            enum: ["auto", "simple", "coder", "vision", "web"],
+            description: "Optional. Force a route instead of auto-classifying. Default: auto.",
+          },
+          image_path: {
+            type: "string",
+            description: "Optional. Local file path or URL of an image — routes to the vision model.",
+          },
+          use_history: {
+            type: "boolean",
+            description: "Optional. Include the last few sonar exchanges as context for follow-ups. Default: false.",
+          },
         },
         required: ["prompt"],
       },
@@ -262,27 +605,39 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "sonar_stats",
       description:
-        "Show how many tokens have been processed locally by Sonar, " +
+        "Show tokens processed locally by Sonar and the estimated Claude API cost saved, " +
         "broken down by today, this week, this month, and this year.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "sonar_health",
+      description:
+        "Check Sonar's status: whether Ollama is reachable, which models are loaded in VRAM, " +
+        "and whether all configured models are pulled and ready.",
       inputSchema: { type: "object", properties: {} },
     },
   ],
 }));
 
-// Translate raw failures into something a user can actually act on.
 function friendlyError(err) {
   const msg = err?.message ?? String(err);
   if (err?.name === "AbortError" || /timeout|aborted/i.test(msg)) {
-    return "⚠️ Sonar timed out. The model may still be loading into VRAM on first call — try again in a few seconds. If it persists, check that Ollama is responsive.";
+    return "⚠️ Sonar timed out. The model may still be loading into VRAM on first call — try again in a few seconds.";
   }
   if (/ECONNREFUSED|fetch failed|ENOTFOUND/i.test(msg)) {
-    return "⚠️ Sonar can't reach Ollama at http://localhost:11434. Start the Ollama app (Windows tray icon / macOS menu bar) and retry.";
+    return `⚠️ Sonar can't reach Ollama at ${OLLAMA_BASE}. Start the Ollama app (Windows tray icon / macOS menu bar) and retry.`;
   }
-  if (/model.*not found|pull.*model/i.test(msg)) {
-    return "⚠️ The required Ollama model isn't installed. Run: ollama pull llama3.1:8b && ollama pull qwen2.5-coder:7b";
+  if (/model.*not found|pull.*model|not found, try pulling/i.test(msg)) {
+    return "⚠️ A required Ollama model isn't installed. Run sonar_health to see which, then `ollama pull <model>`.";
   }
-  if (/out of memory|cudaMalloc/i.test(msg)) {
-    return "⚠️ GPU ran out of VRAM. Close other GPU-using apps (games, video editors) and retry. Sonar uses keep_alive:0 so models unload after each call.";
+  if (/out of memory|cudaMalloc|memory layout cannot be allocated/i.test(msg)) {
+    return "⚠️ GPU couldn't allocate VRAM for the model. This often happens if a previous model " +
+           "is still unloading — wait a couple of seconds and retry. If it persists, close other " +
+           "GPU-using apps (games, video editors).";
+  }
+  if (/CUDA error|runner process has terminated|GGML_ASSERT/i.test(msg)) {
+    return "⚠️ The Ollama model runner crashed (GPU error). This is usually transient — just retry. " +
+           "If it keeps happening, restart Ollama or update your GPU driver.";
   }
   return `⚠️ Sonar error: ${msg}`;
 }
@@ -291,33 +646,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
-    if (name === "sonar_stats") {
-      return { content: [{ type: "text", text: aggregateStats() }] };
-    }
+    if (name === "sonar_stats")  return { content: [{ type: "text", text: aggregateStats() }] };
+    if (name === "sonar_health") return { content: [{ type: "text", text: await healthCheck() }] };
 
     if (name === "sonar") {
-      const prompt = args.prompt;
+      const prompt      = args.prompt;
+      const override    = args.model || "auto";
+      const imagePath   = args.image_path;
+      const useHistory  = args.use_history === true;
 
-      console.error(`[sonar] classifying prompt...`);
-      const route = await classifyPrompt(prompt);
+      // ── Decide the route ────────────────────────────────────────────────
+      let route;
+      if (imagePath)                 route = "vision";
+      else if (override !== "auto")  route = override;
+      else {
+        console.error(`[sonar] classifying prompt...`);
+        route = await classifyPrompt(prompt);
+      }
+      console.error(`[sonar] route = ${route}${imagePath ? " (image)" : ""}${useHistory ? " (history)" : ""}`);
 
-      // ── Web route ──────────────────────────────────────────────────────────
+      // ── Web route ───────────────────────────────────────────────────────
       if (route === "web") {
         const explicitUrl = extractUrl(prompt);
-        let webContext;
-        let source;
-
+        let webContext, source;
         try {
           if (explicitUrl) {
             webContext = await fetchUrl(explicitUrl);
             source     = `fetched: ${explicitUrl}`;
           } else {
-            webContext = await webSearch(prompt);
-            source     = `DuckDuckGo search`;
+            const r    = await multiSearch(prompt);
+            webContext = r.text;
+            source     = `web search (${r.used}/${r.total} engines)`;
           }
         } catch (e) {
-          // Fall back to model-only answer if web fails
-          console.error(`[sonar/web] fetch failed (${e.message}) — falling back to model-only`);
+          console.error(`[sonar/web] fetch failed (${e.message}) — model-only fallback`);
           webContext = `(web fetch failed: ${e.message})`;
           source     = `web fetch failed — answering from training data only`;
         }
@@ -327,38 +689,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `--- WEB CONTENT (${source}) ---\n${webContext}\n--- END ---\n\n` +
           `Question: ${prompt}`;
 
-        console.error(`[sonar] routing to ${MODELS.simple} with web context`);
-        const { content, promptTokens, completionTokens } = await askOllama(MODELS.simple, augmented);
+        const { content, promptTokens, completionTokens } =
+          await askOllamaSimple(MODELS.simple, augmented);
         saveTokens(promptTokens, completionTokens);
-        console.error(`[sonar] tokens — prompt: ${promptTokens}, completion: ${completionTokens}`);
-
-        return {
-          content: [{ type: "text", text: `[routed to ${MODELS.simple} + ${source}]\n\n${content}` }],
-        };
+        if (useHistory) pushHistory(prompt, content);
+        return { content: [{ type: "text", text: `[routed to ${MODELS.simple} + ${source}]\n\n${content}` }] };
       }
 
-      // ── Simple / Coder route ───────────────────────────────────────────────
-      const model = MODELS[route];
-      console.error(`[sonar] routing to ${model}`);
-      const { content, promptTokens, completionTokens } = await askOllama(model, prompt);
-      saveTokens(promptTokens, completionTokens);
-      console.error(`[sonar] tokens — prompt: ${promptTokens}, completion: ${completionTokens}`);
+      // ── Vision route ────────────────────────────────────────────────────
+      if (route === "vision") {
+        if (!imagePath) throw new Error("vision route requires image_path");
+        const b64 = await loadImageBase64(imagePath);
+        const messages = [{ role: "user", content: prompt, images: [b64] }];
+        const { content, promptTokens, completionTokens } =
+          await askOllama(MODELS.vision, messages);
+        saveTokens(promptTokens, completionTokens);
+        if (useHistory) pushHistory(prompt, content);
+        return { content: [{ type: "text", text: `[routed to ${MODELS.vision} (vision)]\n\n${content}` }] };
+      }
 
-      return {
-        content: [{ type: "text", text: `[routed to ${model}]\n\n${content}` }],
-      };
+      // ── Simple / Coder route ────────────────────────────────────────────
+      const model = MODELS[route];
+      if (!model) throw new Error(`Unknown route "${route}"`);
+
+      const messages = [];
+      if (useHistory) messages.push(...history);
+      messages.push({ role: "user", content: prompt });
+
+      const { content, promptTokens, completionTokens } = await askOllama(model, messages);
+      saveTokens(promptTokens, completionTokens);
+      if (useHistory) pushHistory(prompt, content);
+      console.error(`[sonar] tokens — prompt: ${promptTokens}, completion: ${completionTokens}`);
+      return { content: [{ type: "text", text: `[routed to ${model}]\n\n${content}` }] };
     }
 
     throw new Error(`Unknown tool: ${name}`);
   } catch (err) {
     console.error(`[sonar] error: ${err?.stack ?? err}`);
-    return {
-      content: [{ type: "text", text: friendlyError(err) }],
-      isError: true,
-    };
+    return { content: [{ type: "text", text: friendlyError(err) }], isError: true };
   }
 });
 
+MODELS = await resolveModels();
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("[sonar] Ollama MCP server running");
+console.error(`[sonar] Ollama MCP server running (v${VERSION}) — models: simple=${MODELS.simple} coder=${MODELS.coder} vision=${MODELS.vision}`);
