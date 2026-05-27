@@ -8,11 +8,13 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 
-const __dirname  = path.dirname(fileURLToPath(import.meta.url));
-const STATS_FILE = path.join(__dirname, "token-stats.json");
+const __dirname   = path.dirname(fileURLToPath(import.meta.url));
+const STATS_FILE  = path.join(__dirname, "token-stats.json");
 const CONFIG_FILE = path.join(__dirname, "sonar.config.json");
+const INSTALL_JS  = path.join(__dirname, "install.js");
+const GITHUB_RAW  = "https://raw.githubusercontent.com/wanz1000/sonar-mcp/main";
 const PKG        = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
 const VERSION    = PKG.version;
 
@@ -559,6 +561,98 @@ async function healthCheck() {
   return lines.join("\n");
 }
 
+// ── Update check ─────────────────────────────────────────────────────────────
+
+// true if semver a is strictly greater than b  ("1.3.0" > "1.2.1")
+function semverGt(a, b) {
+  const parse = v => v.replace(/^v/, "").split(".").map(Number);
+  const [aMaj, aMin, aPat] = parse(a);
+  const [bMaj, bMin, bPat] = parse(b);
+  if (aMaj !== bMaj) return aMaj > bMaj;
+  if (aMin !== bMin) return aMin > bMin;
+  return aPat > bPat;
+}
+
+// Extract CHANGELOG.md sections for versions newer than `from` up to `to` (inclusive).
+function extractChangelogSections(text, from, to) {
+  const sections = [];
+  let buf = [];
+  let capturing = false;
+
+  for (const line of text.split("\n")) {
+    const m = line.match(/^## \[(\d+\.\d+\.\d+)\]/);
+    if (m) {
+      if (capturing && buf.length) { sections.push(buf.join("\n").trimEnd()); buf = []; }
+      const v = m[1];
+      capturing = semverGt(v, from) && !semverGt(v, to);
+      if (capturing) buf.push(line);
+    } else if (capturing) {
+      buf.push(line);
+    }
+  }
+  if (capturing && buf.length) sections.push(buf.join("\n").trimEnd());
+  return sections.join("\n\n");
+}
+
+async function checkForUpdate() {
+  const lines = [`🔍 Sonar Update Check   sonar-mcp v${VERSION}`, ``];
+
+  let remotePkg;
+  try {
+    const res = await fetchWithTimeout(`${GITHUB_RAW}/package.json`, {}, 10000);
+    if (!res.ok) throw new Error(`GitHub returned HTTP ${res.status}`);
+    remotePkg = await res.json();
+  } catch (e) {
+    lines.push(`  ⚠️  Could not reach GitHub: ${e.message}`);
+    return lines.join("\n");
+  }
+
+  const latest = remotePkg.version;
+
+  if (!semverGt(latest, VERSION)) {
+    lines.push(`  ✅ Already on the latest version (v${VERSION})`);
+    return lines.join("\n");
+  }
+
+  lines.push(`  🆕 v${latest} is available  (you have v${VERSION})`, ``);
+
+  // Fetch changelog and extract new sections
+  try {
+    const clRes = await fetchWithTimeout(`${GITHUB_RAW}/CHANGELOG.md`, {}, 10000);
+    if (clRes.ok) {
+      const sections = extractChangelogSections(await clRes.text(), VERSION, latest);
+      if (sections) {
+        lines.push(`  What's new:`, ``);
+        for (const l of sections.split("\n")) lines.push(`  ${l}`);
+        lines.push(``);
+      }
+    }
+  } catch { /* changelog unavailable — skip */ }
+
+  lines.push(`  Run **sonar_update** to install v${latest} now.`);
+  lines.push(`  A full Claude Desktop restart will be needed after updating.`);
+  return lines.join("\n");
+}
+
+async function runUpdate() {
+  const result = spawnSync(
+    process.execPath,
+    [INSTALL_JS, "--update", "--yes"],
+    { cwd: __dirname, encoding: "utf8", timeout: 120000, shell: false }
+  );
+  const out = ((result.stdout || "") + (result.stderr || "")).trim();
+  if (result.status !== 0) throw new Error(`Update failed:\n${out}`);
+
+  // Extract the new version from the output for a clean confirmation message
+  const vMatch = out.match(/Updated to v([\d.]+)/i);
+  const newVer  = vMatch ? vMatch[1] : "unknown";
+  return [
+    `✅ Updated to v${newVer}`,
+    ``,
+    `Fully restart Claude Desktop (quit from system tray, then reopen) to load the new version.`,
+  ].join("\n");
+}
+
 // ── MCP server ────────────────────────────────────────────────────────────────
 
 const server = new Server(
@@ -616,6 +710,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "and whether all configured models are pulled and ready.",
       inputSchema: { type: "object", properties: {} },
     },
+    {
+      name: "sonar_update_check",
+      description:
+        "Check GitHub for a newer version of Sonar. If one is available, shows the version number, " +
+        "what changed (from the changelog), and prompts whether to update.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "sonar_update",
+      description:
+        "Install the latest version of Sonar from GitHub (git pull + npm install). " +
+        "Run sonar_update_check first to see what will change. " +
+        "A full Claude Desktop restart is required after updating.",
+      inputSchema: { type: "object", properties: {} },
+    },
   ],
 }));
 
@@ -646,8 +755,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
-    if (name === "sonar_stats")  return { content: [{ type: "text", text: aggregateStats() }] };
-    if (name === "sonar_health") return { content: [{ type: "text", text: await healthCheck() }] };
+    if (name === "sonar_stats")        return { content: [{ type: "text", text: aggregateStats() }] };
+    if (name === "sonar_health")       return { content: [{ type: "text", text: await healthCheck() }] };
+    if (name === "sonar_update_check") return { content: [{ type: "text", text: await checkForUpdate() }] };
+    if (name === "sonar_update")       return { content: [{ type: "text", text: await runUpdate() }] };
 
     if (name === "sonar") {
       const prompt      = args.prompt;

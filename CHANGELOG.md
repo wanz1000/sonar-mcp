@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-05-27
+
+### Added
+- **`sonar_update_check`** tool — fetches the latest `package.json` from GitHub, compares it against the running version, and if a newer release exists shows the version number and the relevant CHANGELOG sections. Prompts to run `sonar_update` to install.
+- **`sonar_update`** tool — runs `node install.js --update --yes` to pull the latest code from GitHub, re-install dependencies if needed, and verify the server still starts. Instructs the user to fully restart Claude Desktop afterwards.
+- **GPU-aware model auto-selection** — at startup Sonar queries `nvidia-smi` for free VRAM and `ollama /api/tags` for locally available models, then picks the best fitting model per role from a ranked preference table. Falls back to `sonar.config.json` models if Ollama is unreachable or `autoSelectModels` is `false`.
+- **Reduced default context window** (`numCtx: 4096`) — cuts KV-cache VRAM from ~4 GiB to ~0.5 GiB per model, preventing GPU memory contention with other applications.
+- **Memory-mapped model loading** (`useMmap: true`) — passes `use_mmap` to Ollama so model weights are mapped from disk instead of `malloc`'d, avoiding Windows commit-charge failures on systems with small page files.
+
 ## [1.1.0] - 2026-05-20
 
 ### Added
