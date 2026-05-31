@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-05-27
+
+### Changed
+- **Replaced broken DDG scrapers with Brave Search API** — `duckduckgo` and `duckduckgo-lite` engines removed; DuckDuckGo now blocks all HTML scraping and returns the homepage for bot requests. Add a free Brave Search API key (`search.braveApiKey` in `sonar.config.json`) to restore full web search. Keys are free at https://api.search.brave.com/register.
+- Default engine list is now `["brave", "wikipedia", "ddg-instant", "searxng"]`; `brave` is silently skipped when no key is configured so the other two still work without setup.
+- `sonar_health` now shows Brave API key status and a link to register.
+
+### Fixed
+- `multiSearch` no longer counts `brave` against the active engine total when no key is set, so the "X/N engines" label in responses is accurate.
+
 ## [1.3.0] - 2026-05-27
 
 ### Added

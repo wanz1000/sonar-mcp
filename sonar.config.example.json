@@ -6,9 +6,13 @@
     "coder": "qwen2.5-coder:7b",
     "vision": "gemma3:12b"
   },
+  "autoSelectModels": true,
+  "numCtx": 4096,
+  "useMmap": true,
   "search": {
-    "_comment": "engines run in parallel and results are merged. searxng is skipped unless searxngUrl is set.",
-    "engines": ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"],
+    "_comment": "engines run in parallel, results merged + deduped. brave requires braveApiKey. searxng requires searxngUrl.",
+    "engines": ["brave", "wikipedia", "ddg-instant", "searxng"],
+    "braveApiKey": "",
     "searxngUrl": ""
   },
   "pricing": {

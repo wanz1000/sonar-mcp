@@ -32,9 +32,12 @@ const DEFAULT_CONFIG = {
   useMmap: true,                // memory-map model weights instead of malloc — reduces commit charge
   search: {
     // Which engines to query in parallel. Omit / empty = all available.
-    // Valid: "duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"
-    engines:    ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"],
-    searxngUrl: "",             // e.g. "http://localhost:8888" — enables the searxng engine
+    // Valid: "brave", "wikipedia", "ddg-instant", "searxng"
+    // Note: "duckduckgo" and "duckduckgo-lite" have been removed — DDG blocks HTML scraping.
+    // "brave" requires search.braveApiKey — free at https://api.search.brave.com/register
+    engines:    ["brave", "wikipedia", "ddg-instant", "searxng"],
+    braveApiKey: "",            // get a free key at https://api.search.brave.com/register
+    searxngUrl:  "",            // e.g. "http://localhost:8888" — enables the searxng engine
   },
   pricing: {
     // Rough Claude API list prices (USD per million tokens) for the savings estimate.
@@ -76,7 +79,9 @@ function loadConfig() {
     return {
       ...DEFAULT_CONFIG, ...u,
       models:           { ...DEFAULT_CONFIG.models,  ...(u.models  || {}) },
-      search:           { ...DEFAULT_CONFIG.search,  ...(u.search  || {}) },
+      search:           { ...DEFAULT_CONFIG.search,  ...(u.search  || {}),
+                          braveApiKey: (u.search?.braveApiKey ?? DEFAULT_CONFIG.search.braveApiKey),
+                          searxngUrl:  (u.search?.searxngUrl  ?? DEFAULT_CONFIG.search.searxngUrl) },
       pricing:          { ...DEFAULT_CONFIG.pricing, ...(u.pricing || {}) },
       numCtx:           u.numCtx           ?? DEFAULT_CONFIG.numCtx,
       useMmap:          u.useMmap          ?? DEFAULT_CONFIG.useMmap,
@@ -260,49 +265,28 @@ async function fetchUrl(url) {
 // or returning junk no longer breaks the web route. Results are merged and
 // de-duplicated by URL.
 
-function decodeDdgHref(href) {
-  // DDG redirect links look like //duckduckgo.com/l/?uddg=<encoded real url>
-  try {
-    const m = href.match(/[?&]uddg=([^&]+)/);
-    if (m) return decodeURIComponent(m[1]);
-  } catch { /* fall through */ }
-  return href.startsWith("//") ? "https:" + href : href;
-}
-
-// Engine 1 — DuckDuckGo HTML endpoint
-async function engineDuckDuckGo(query) {
-  const url  = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 12000);
-  const html = await res.text();
-  const titleRe   = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  const snippetRe = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-  const titles    = [...html.matchAll(titleRe)].slice(0, 5);
-  const snippets  = [...html.matchAll(snippetRe)].slice(0, 5).map(m => stripHtml(m[1]));
-  return titles.map((m, i) => ({
-    title:   stripHtml(m[2]),
-    snippet: snippets[i] || "",
-    url:     decodeDdgHref(m[1]),
+// Engine 1 — Brave Search API (requires free API key: https://api.search.brave.com/register)
+async function engineBrave(query) {
+  const key = (CONFIG.search.braveApiKey || "").trim();
+  if (!key) return [];   // silently skip if no key configured
+  const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`;
+  const res = await fetchWithTimeout(url, {
+    headers: {
+      "Accept":               "application/json",
+      "Accept-Encoding":      "gzip",
+      "X-Subscription-Token": key,
+    },
+  }, 12000);
+  if (!res.ok) throw new Error(`Brave Search returned HTTP ${res.status}`);
+  const data = await res.json();
+  return (data?.web?.results || []).slice(0, 5).map(r => ({
+    title:   r.title   || "",
+    snippet: r.description || "",
+    url:     r.url     || "",
   }));
 }
 
-// Engine 2 — DuckDuckGo Lite (different layout; often succeeds when HTML doesn't)
-async function engineDuckDuckGoLite(query) {
-  const url  = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-  const res  = await fetchWithTimeout(url, { headers: { "User-Agent": BROWSER_UA } }, 12000);
-  const html = await res.text();
-  // DDG Lite puts href before class and uses single-quoted class attributes
-  const linkRe    = /<a[^>]*href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRe = /<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
-  const links     = [...html.matchAll(linkRe)].slice(0, 5);
-  const snippets  = [...html.matchAll(snippetRe)].slice(0, 5).map(m => stripHtml(m[1]));
-  return links.map((m, i) => ({
-    title:   stripHtml(m[2]),
-    snippet: snippets[i] || "",
-    url:     decodeDdgHref(m[1]),
-  }));
-}
-
-// Engine 3 — Wikipedia search API (very reliable for factual / definitional queries)
+// Engine 2 — Wikipedia search API (very reliable for factual / definitional queries)
 async function engineWikipedia(query) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=3` +
               `&srsearch=${encodeURIComponent(query)}`;
@@ -347,11 +331,10 @@ async function engineSearxng(query) {
 }
 
 const ALL_ENGINES = {
-  "duckduckgo":      engineDuckDuckGo,
-  "duckduckgo-lite": engineDuckDuckGoLite,
-  "wikipedia":       engineWikipedia,
-  "ddg-instant":     engineDdgInstant,
-  "searxng":         engineSearxng,
+  "brave":       engineBrave,
+  "wikipedia":   engineWikipedia,
+  "ddg-instant": engineDdgInstant,
+  "searxng":     engineSearxng,
 };
 
 function normalizeUrl(u) {
@@ -364,8 +347,9 @@ async function multiSearch(query) {
   // Which engines to run: config.search.engines, or all (searxng only if URL set)
   let engineNames = Array.isArray(CONFIG.search.engines) && CONFIG.search.engines.length
     ? CONFIG.search.engines.filter(n => ALL_ENGINES[n])
-    : ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"];
-  if (!CONFIG.search.searxngUrl) engineNames = engineNames.filter(n => n !== "searxng");
+    : ["brave", "wikipedia", "ddg-instant", "searxng"];
+  if (!CONFIG.search.searxngUrl)  engineNames = engineNames.filter(n => n !== "searxng");
+  if (!CONFIG.search.braveApiKey) engineNames = engineNames.filter(n => n !== "brave");
 
   console.error(`[sonar/web] multi-engine search (${engineNames.join(", ")}): ${query}`);
   const settled = await Promise.allSettled(engineNames.map(n => ALL_ENGINES[n](query)));
@@ -555,8 +539,10 @@ async function healthCheck() {
     ? [...CONFIG.search.engines]
     : ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"];
   if (!CONFIG.search.searxngUrl) engs = engs.filter(n => n !== "searxng");
-  lines.push(`  Search   : ${engs.length} engine(s) — ${engs.join(", ")}` +
-             (CONFIG.search.searxngUrl ? `  (searxng: ${CONFIG.search.searxngUrl})` : ""));
+  const braveStatus = CONFIG.search.braveApiKey ? "✅ key set" : "⚠️  no key — get one free at https://api.search.brave.com/register";
+  lines.push(`  Search   : ${engs.length} engine(s) — ${engs.join(", ")}`);
+  lines.push(`  Brave    : ${braveStatus}`);
+  if (CONFIG.search.searxngUrl) lines.push(`  SearXNG  : ${CONFIG.search.searxngUrl}`);
   lines.push(`  History  : keeps last ${CONFIG.historyTurns} exchange(s) when use_history is on`);
   return lines.join("\n");
 }
