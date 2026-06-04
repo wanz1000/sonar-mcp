@@ -163,20 +163,49 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 120000) {
 
 // ── Token tracking ────────────────────────────────────────────────────────────
 
+const PRO_CTX    = 200_000;  // Claude Pro context window (tokens)
+const KEEP_DAYS  = 365;      // rolling window — entries older than this are pruned
+
 function loadStats() {
   try { return JSON.parse(fs.readFileSync(STATS_FILE, "utf8")); }
   catch { return {}; }
 }
 
+function pruneStats(stats) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - KEEP_DAYS);
+  const pad = (n) => String(n).padStart(2, "0");
+  const cutoffStr = `${cutoff.getFullYear()}-${pad(cutoff.getMonth()+1)}-${pad(cutoff.getDate())}`;
+  for (const dateStr of Object.keys(stats)) {
+    if (dateStr < cutoffStr) delete stats[dateStr];
+  }
+  return stats;
+}
+
 function saveTokens(promptTokens, completionTokens) {
-  const stats = loadStats();
+  let stats = loadStats();
   const pad   = (n) => String(n).padStart(2, "0");
   const now   = new Date();
   const today = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
-  if (!stats[today]) stats[today] = { promptTokens: 0, completionTokens: 0, requests: 0 };
+  if (!stats[today]) stats[today] = { promptTokens: 0, completionTokens: 0, requests: 0, claudeTokens: 0, claudeSessions: 0 };
   stats[today].promptTokens     += promptTokens;
   stats[today].completionTokens += completionTokens;
   stats[today].requests         += 1;
+  stats = pruneStats(stats);
+  fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2));
+}
+
+function saveClaudeTokens(sessionTokens) {
+  // Record Claude context-window tokens for today. Each call is treated as one
+  // session's peak usage — we accumulate across sessions in a day.
+  let stats = loadStats();
+  const pad   = (n) => String(n).padStart(2, "0");
+  const now   = new Date();
+  const today = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+  if (!stats[today]) stats[today] = { promptTokens: 0, completionTokens: 0, requests: 0, claudeTokens: 0, claudeSessions: 0 };
+  stats[today].claudeTokens    = (stats[today].claudeTokens    || 0) + sessionTokens;
+  stats[today].claudeSessions  = (stats[today].claudeSessions  || 0) + 1;
+  stats = pruneStats(stats);
   fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2));
 }
 
@@ -187,55 +216,73 @@ function aggregateStats() {
   const ymd   = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
   const ws    = new Date(now); ws.setDate(now.getDate() - now.getDay());
 
+  // Rolling 30-day window for "month" (avoids month boundary weirdness)
+  const m30 = new Date(now); m30.setDate(now.getDate() - 30);
+
   const cutoffs = {
-    today: ymd(now),
-    week:  ymd(ws),
-    month: `${now.getFullYear()}-${pad(now.getMonth()+1)}-01`,
-    year:  `${now.getFullYear()}-01-01`,
+    Today:       ymd(now),
+    "This week": ymd(ws),
+    "30 days":   ymd(m30),
+    "This year": `${now.getFullYear()}-01-01`,
+    "All time":  "2000-01-01",
   };
 
   const totals = {};
   for (const [label, since] of Object.entries(cutoffs)) {
-    totals[label] = { promptTokens: 0, completionTokens: 0, requests: 0 };
+    totals[label] = { sonarPrompt: 0, sonarCompletion: 0, requests: 0, claudeTokens: 0, claudeSessions: 0 };
     for (const [dateStr, entry] of Object.entries(stats)) {
       if (dateStr >= since) {
-        totals[label].promptTokens     += entry.promptTokens;
-        totals[label].completionTokens += entry.completionTokens;
-        totals[label].requests         += entry.requests;
+        totals[label].sonarPrompt      += entry.promptTokens     || 0;
+        totals[label].sonarCompletion  += entry.completionTokens || 0;
+        totals[label].requests         += entry.requests         || 0;
+        totals[label].claudeTokens     += entry.claudeTokens     || 0;
+        totals[label].claudeSessions   += entry.claudeSessions   || 0;
       }
     }
   }
 
-  // Estimated $ that would have been spent on the Claude API for the same tokens.
   const estCost = (t) => {
-    const inUsd  = (t.promptTokens     / 1e6) * CONFIG.pricing.inputPerMillion;
-    const outUsd = (t.completionTokens / 1e6) * CONFIG.pricing.outputPerMillion;
+    const inUsd  = (t.sonarPrompt     / 1e6) * CONFIG.pricing.inputPerMillion;
+    const outUsd = (t.sonarCompletion / 1e6) * CONFIG.pricing.outputPerMillion;
     return inUsd + outUsd;
   };
 
-  const PRO_CTX = 200_000; // Claude Pro context window (tokens)
-
-  const fmt = (t) => {
-    const total = t.promptTokens + t.completionTokens;
-    const pct   = ((total / PRO_CTX) * 100).toFixed(1);
-    const filled = Math.round(total / PRO_CTX * 20);
-    const bar   = "#".repeat(filled).padEnd(20, "-");
-    return `${total.toLocaleString()} tokens  [${bar}] ${pct}% of a Pro session` +
-           `  (~$${estCost(t).toFixed(2)} saved)  ${t.requests} req`;
+  const bar = (tokens, cap) => {
+    const filled = Math.min(20, Math.round((tokens / cap) * 20));
+    return "[" + "#".repeat(filled).padEnd(20, "-") + "]";
   };
 
-  return [
-    `📊 Sonar Token Usage (processed locally)   sonar-mcp v${VERSION}`,
-    `   (100% = 1 Claude Pro session = ${PRO_CTX.toLocaleString()} tokens)`,
+  const pct = (n, d) => d > 0 ? ((n / d) * 100).toFixed(1) + "%" : "n/a";
+
+  // Header
+  const lines = [
+    `📊 Token Usage: Sonar (local GPU) vs Claude (API)   sonar-mcp v${VERSION}`,
+    `   1 Pro session = ${PRO_CTX.toLocaleString()} tokens   |   data kept for ${KEEP_DAYS} days`,
     ``,
-    `  Today   : ${fmt(totals.today)}`,
-    `  Week    : ${fmt(totals.week)}`,
-    `  Month   : ${fmt(totals.month)}`,
-    `  Year    : ${fmt(totals.year)}`,
-    ``,
-    `  Savings estimated at $${CONFIG.pricing.inputPerMillion}/M input + ` +
-      `$${CONFIG.pricing.outputPerMillion}/M output (editable in sonar.config.json).`,
-  ].join("\n");
+    `  ${"Period".padEnd(10)} | ${"Sonar tokens".padEnd(24)} | ${"Claude tokens".padEnd(24)} | Local% | Saved`,
+    `  ${"-".repeat(10)}-+-${"-".repeat(24)}-+-${"-".repeat(24)}-+--------+-------`,
+  ];
+
+  for (const [label, t] of Object.entries(totals)) {
+    const sonarTotal  = t.sonarPrompt + t.sonarCompletion;
+    const claudeTotal = t.claudeTokens;
+    const combined    = sonarTotal + claudeTotal;
+    const localPct    = combined > 0 ? ((sonarTotal / combined) * 100).toFixed(0) + "%" : "n/a";
+    const sonarStr    = `${sonarTotal.toLocaleString().padStart(7)} ${bar(sonarTotal, PRO_CTX)} ${pct(sonarTotal, PRO_CTX).padStart(6)}`;
+    const claudeStr   = claudeTotal > 0
+      ? `${claudeTotal.toLocaleString().padStart(7)} ${bar(claudeTotal, PRO_CTX)} ${pct(claudeTotal, PRO_CTX).padStart(6)}`
+      : `${"(not yet logged)".padStart(7 + 1 + 22)}`;
+    const cost        = `$${estCost(t).toFixed(2)}`;
+    lines.push(`  ${label.padEnd(10)} | ${sonarStr} | ${claudeStr} | ${localPct.padStart(6)} | ${cost}`);
+  }
+
+  lines.push(``);
+  lines.push(`  Sonar req: ${totals["All time"].requests} total  |  ` +
+             `Claude sessions logged: ${totals["All time"].claudeSessions}`);
+  lines.push(`  To log this Claude session: call sonar_stats with claude_context_tokens = <your current token count>`);
+  lines.push(`  Savings at $${CONFIG.pricing.inputPerMillion}/M in + $${CONFIG.pricing.outputPerMillion}/M out (sonar.config.json)`);
+
+  return lines.join("\n");
 }
 
 // ── Web helpers ───────────────────────────────────────────────────────────────
@@ -690,9 +737,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "sonar_stats",
       description:
-        "Show tokens processed locally by Sonar and the estimated Claude API cost saved, " +
-        "broken down by today, this week, this month, and this year.",
-      inputSchema: { type: "object", properties: {} },
+        "Show a side-by-side comparison of Sonar (local GPU) tokens vs Claude API context tokens, " +
+        "broken down by today, this week, 30 days, this year, and all time. " +
+        "Pass claude_context_tokens to log the current Claude session size so the comparison stays accurate.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          claude_context_tokens: {
+            type: "number",
+            description: "Approximate tokens used in the current Claude context window this session. " +
+                         "Pass this each time you call sonar_stats so Claude usage is tracked alongside Sonar usage.",
+          },
+        },
+      },
     },
     {
       name: "sonar_health",
@@ -746,7 +803,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
-    if (name === "sonar_stats")        return { content: [{ type: "text", text: aggregateStats() }] };
+    if (name === "sonar_stats") {
+      if (args?.claude_context_tokens > 0) saveClaudeTokens(Math.round(args.claude_context_tokens));
+      return { content: [{ type: "text", text: aggregateStats() }] };
+    }
     if (name === "sonar_health")       return { content: [{ type: "text", text: await healthCheck() }] };
     if (name === "sonar_update_check") return { content: [{ type: "text", text: await checkForUpdate() }] };
     if (name === "sonar_update")       return { content: [{ type: "text", text: await runUpdate() }] };

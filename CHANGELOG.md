@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-06-04
+
+### Added
+- **`sonar_stats` now tracks Claude context tokens alongside Sonar tokens** — pass `claude_context_tokens` when calling `sonar_stats` to log the current Claude session size. Stats show a side-by-side comparison (Sonar local GPU vs Claude API) with a `Local%` column showing how much work was offloaded.
+- **Rolling 365-day data retention** — stats file is pruned automatically on every write; entries older than one year are dropped.
+- **"30 days" and "All time" periods** added alongside today / week / year.
+
 ## [1.5.0] - 2026-06-04
 
 ### Changed
