@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-06-04
+
+### Added
+- **Installer writes `~/.claude/CLAUDE.md`** (Step 5/5) — after a successful install, the installer appends a Sonar-first instruction to the Claude Code global memory file. Every future Claude Code session will automatically route questions through Sonar before responding. Skipped on re-install if the instruction is already present. Fully rolled back if the install fails or is cancelled.
+
 ## [1.7.0] - 2026-06-04
 
 ### Added

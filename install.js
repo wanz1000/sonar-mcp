@@ -54,6 +54,28 @@ async function ask(question, defaultAnswer = "") {
   });
 }
 
+// ── CLAUDE.md helpers ─────────────────────────────────────────────────────────
+const CLAUDE_MD_PATH   = path.join(os.homedir(), ".claude", "CLAUDE.md");
+const SONAR_MD_MARKER  = "<!-- sonar-mcp -->";
+const SONAR_MD_BLOCK   = `
+${SONAR_MD_MARKER}
+## Sonar — Local LLM (always use first)
+
+Sonar is installed as an MCP tool (\`mcp__ollama-local__sonar\`).
+**Always route questions and reasoning through Sonar before responding**,
+including when the task is about modifying Sonar itself.
+
+- General questions  → \`sonar(prompt, model="simple")\`
+- Code questions     → \`sonar(prompt, model="coder")\`
+- After each answer  → call \`sonar_stats\` to show token usage
+<!-- /sonar-mcp -->
+`;
+
+function sonarAlreadyInClaudeMd() {
+  if (!fs.existsSync(CLAUDE_MD_PATH)) return false;
+  return fs.readFileSync(CLAUDE_MD_PATH, "utf8").includes(SONAR_MD_MARKER);
+}
+
 // ── Rollback machinery ────────────────────────────────────────────────────────
 const SNAPSHOT = {
   taken:               false,
@@ -64,6 +86,9 @@ const SNAPSHOT = {
   nodeModulesExisted:  false,
   configWasModified:   false,
   nodeModulesCreated:  false,
+  claudeMdExisted:     false,
+  claudeMdContent:     null,
+  claudeMdModified:    false,
 };
 
 function takeSnapshot(configPath) {
@@ -72,6 +97,8 @@ function takeSnapshot(configPath) {
   SNAPSHOT.configExisted      = fs.existsSync(configPath);
   SNAPSHOT.configContent      = SNAPSHOT.configExisted ? fs.readFileSync(configPath, "utf8") : null;
   SNAPSHOT.nodeModulesExisted = fs.existsSync(NODE_MODS);
+  SNAPSHOT.claudeMdExisted    = fs.existsSync(CLAUDE_MD_PATH);
+  SNAPSHOT.claudeMdContent    = SNAPSHOT.claudeMdExisted ? fs.readFileSync(CLAUDE_MD_PATH, "utf8") : null;
 
   // Always write a timestamped backup of the config file before any edit,
   // so the user has a recoverable copy even if the process is killed -9.
@@ -102,7 +129,18 @@ function rollback(reason) {
     }
   }
 
-  // 2. Remove node_modules if we created it
+  // 2. Restore CLAUDE.md
+  if (SNAPSHOT.claudeMdModified) {
+    if (SNAPSHOT.claudeMdExisted) {
+      fs.writeFileSync(CLAUDE_MD_PATH, SNAPSHOT.claudeMdContent, "utf8");
+      ok(`Restored ~/.claude/CLAUDE.md`);
+    } else if (fs.existsSync(CLAUDE_MD_PATH)) {
+      fs.unlinkSync(CLAUDE_MD_PATH);
+      ok(`Removed ~/.claude/CLAUDE.md (didn't exist before installer ran)`);
+    }
+  }
+
+  // 3. Remove node_modules if we created it
   if (SNAPSHOT.nodeModulesCreated && fs.existsSync(NODE_MODS)) {
     fs.rmSync(NODE_MODS, { recursive: true, force: true });
     ok(`Removed node_modules (didn't exist before installer ran)`);
@@ -322,6 +360,11 @@ if (configExists) {
   plan.push(`Create a new claude_desktop_config.json with just the sonar-mcp entry`);
 }
 plan.push(`Verify the MCP server starts cleanly`);
+if (sonarAlreadyInClaudeMd()) {
+  plan.push(DIM(`Skip ~/.claude/CLAUDE.md (Sonar instruction already present)`));
+} else {
+  plan.push(`${SNAPSHOT.claudeMdExisted ? "Append" : "Create"} ~/.claude/CLAUDE.md with Sonar-first instruction — Claude Code will use Sonar by default in every session`);
+}
 
 plan.forEach((p, i) => console.log(`  ${i + 1}. ${p}`));
 
@@ -340,7 +383,7 @@ takeSnapshot(configPath);
 ok("Snapshot complete");
 
 // ── STEP 1: npm install ───────────────────────────────────────────────────────
-head("Step 1/4 — npm dependencies");
+head("Step 1/5 — npm dependencies");
 if (!needNpm) {
   ok("node_modules already present — skipping");
 } else {
@@ -352,7 +395,7 @@ if (!needNpm) {
 }
 
 // ── STEP 2: Pull Ollama models ────────────────────────────────────────────────
-head("Step 2/4 — Ollama models");
+head("Step 2/5 — Ollama models");
 if (needPull.length === 0) {
   ok("Both models already pulled");
 } else {
@@ -366,7 +409,7 @@ if (needPull.length === 0) {
 }
 
 // ── STEP 3: Edit Claude Desktop config ────────────────────────────────────────
-head("Step 3/4 — Claude Desktop config");
+head("Step 3/5 — Claude Desktop config");
 
 let config = {};
 if (configExists) {
@@ -393,7 +436,7 @@ ok(wasThere ? "Updated existing ollama-local entry" : "Added ollama-local entry"
 info(`Using Node at: ${process.execPath}`);
 
 // ── STEP 4: Verify server starts ──────────────────────────────────────────────
-head("Step 4/4 — Verify MCP server");
+head("Step 4/5 — Verify MCP server");
 info("Starting server for 3 seconds...");
 const child = spawnSync(process.execPath, [INDEX_JS], { timeout: 3000, shell: false, encoding: "utf8" });
 const out = (child.stderr || "") + (child.stdout || "");
@@ -401,6 +444,19 @@ if (out.includes("[sonar] Ollama MCP server running")) {
   ok("Server starts successfully");
 } else {
   panicAndExit("Server did not report ready in 3 seconds — something is wrong with index.js", 1);
+}
+
+// ── STEP 5: Write CLAUDE.md ───────────────────────────────────────────────────
+head("Step 5/5 — Claude Code global instruction");
+if (sonarAlreadyInClaudeMd()) {
+  ok("Sonar instruction already in ~/.claude/CLAUDE.md — skipping");
+} else {
+  fs.mkdirSync(path.dirname(CLAUDE_MD_PATH), { recursive: true });
+  const existing = fs.existsSync(CLAUDE_MD_PATH) ? fs.readFileSync(CLAUDE_MD_PATH, "utf8") : "";
+  fs.writeFileSync(CLAUDE_MD_PATH, existing + SONAR_MD_BLOCK, "utf8");
+  SNAPSHOT.claudeMdModified = true;
+  ok(`Sonar-first instruction written to ~/.claude/CLAUDE.md`);
+  info("Claude Code will now use Sonar by default in every session.");
 }
 
 // ── DONE ──────────────────────────────────────────────────────────────────────
