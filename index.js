@@ -213,14 +213,20 @@ function aggregateStats() {
     return inUsd + outUsd;
   };
 
+  const PRO_CTX = 200_000; // Claude Pro context window (tokens)
+
   const fmt = (t) => {
     const total = t.promptTokens + t.completionTokens;
-    return `${total.toLocaleString()} tokens across ${t.requests} request${t.requests !== 1 ? "s" : ""}` +
-           `  (~$${estCost(t).toFixed(2)} saved)`;
+    const pct   = ((total / PRO_CTX) * 100).toFixed(1);
+    const filled = Math.round(total / PRO_CTX * 20);
+    const bar   = "#".repeat(filled).padEnd(20, "-");
+    return `${total.toLocaleString()} tokens  [${bar}] ${pct}% of a Pro session` +
+           `  (~$${estCost(t).toFixed(2)} saved)  ${t.requests} req`;
   };
 
   return [
     `📊 Sonar Token Usage (processed locally)   sonar-mcp v${VERSION}`,
+    `   (100% = 1 Claude Pro session = ${PRO_CTX.toLocaleString()} tokens)`,
     ``,
     `  Today   : ${fmt(totals.today)}`,
     `  Week    : ${fmt(totals.week)}`,
@@ -229,7 +235,6 @@ function aggregateStats() {
     ``,
     `  Savings estimated at $${CONFIG.pricing.inputPerMillion}/M input + ` +
       `$${CONFIG.pricing.outputPerMillion}/M output (editable in sonar.config.json).`,
-    `  To update: run "npm run update" in the sonar-mcp folder.`,
   ].join("\n");
 }
 

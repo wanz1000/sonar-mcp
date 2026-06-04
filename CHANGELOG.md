@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-06-04
+
+### Changed
+- **`sonar_stats` now shows Claude Pro session percentage** — each period's token count is displayed as a percentage of a 200,000-token Claude Pro context window, with an ASCII progress bar, so you can see at a glance how much local compute you've offloaded relative to a full Claude session.
+
 ## [1.4.0] - 2026-05-27
 
 ### Changed
