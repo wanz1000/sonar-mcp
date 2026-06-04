@@ -108,6 +108,33 @@ const CONFIG          = loadConfig();
 const OLLAMA_BASE     = CONFIG.ollamaUrl.replace(/\/$/, "");
 const OLLAMA_CHAT_URL = `${OLLAMA_BASE}/api/chat`;
 
+// ── Session token counter (in-memory, resets on each Claude Desktop restart) ──
+const SESSION = { promptTokens: 0, completionTokens: 0, requests: 0 };
+
+function sessionTally(promptTokens, completionTokens) {
+  SESSION.promptTokens     += promptTokens;
+  SESSION.completionTokens += completionTokens;
+  SESSION.requests         += 1;
+}
+
+function sonarFooter(queryPrompt, queryCompletion) {
+  const PRO          = 200_000;
+  const queryTotal   = queryPrompt + queryCompletion;
+  const sessionTotal = SESSION.promptTokens + SESSION.completionTokens;
+  const qPct         = ((queryTotal   / PRO) * 100).toFixed(1);
+  const sPct         = ((sessionTotal / PRO) * 100).toFixed(1);
+  const estSave      = (
+    (SESSION.promptTokens     / 1e6) * CONFIG.pricing.inputPerMillion  +
+    (SESSION.completionTokens / 1e6) * CONFIG.pricing.outputPerMillion
+  ).toFixed(3);
+  return (
+    `\n\n---\n` +
+    `*Sonar — this query: ${queryTotal.toLocaleString()} tokens (${qPct}% of a Pro session) · ` +
+    `session total: ${sessionTotal.toLocaleString()} tokens (${sPct}%) · ` +
+    `~$${estSave} saved · ${SESSION.requests} req*`
+  );
+}
+
 // Returns free VRAM in GiB, with a safety margin applied. Falls back to Infinity.
 function getFreeVramGB() {
   try {
@@ -915,8 +942,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { content, promptTokens, completionTokens } =
           await askOllamaSimple(MODELS.simple, augmented);
         saveTokens(promptTokens, completionTokens);
+        sessionTally(promptTokens, completionTokens);
         if (useHistory) pushHistory(prompt, content);
-        return { content: [{ type: "text", text: `[routed to ${MODELS.simple} + ${source}]\n\n${content}` }] };
+        return { content: [{ type: "text", text:
+          `[routed to ${MODELS.simple} + ${source}]\n\n${content}` +
+          sonarFooter(promptTokens, completionTokens) }] };
       }
 
       // ── Vision route ────────────────────────────────────────────────────
@@ -927,8 +957,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { content, promptTokens, completionTokens } =
           await askOllama(MODELS.vision, messages);
         saveTokens(promptTokens, completionTokens);
+        sessionTally(promptTokens, completionTokens);
         if (useHistory) pushHistory(prompt, content);
-        return { content: [{ type: "text", text: `[routed to ${MODELS.vision} (vision)]\n\n${content}` }] };
+        return { content: [{ type: "text", text:
+          `[routed to ${MODELS.vision} (vision)]\n\n${content}` +
+          sonarFooter(promptTokens, completionTokens) }] };
       }
 
       // ── Simple / Coder route ────────────────────────────────────────────
@@ -941,9 +974,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const { content, promptTokens, completionTokens } = await askOllama(model, messages);
       saveTokens(promptTokens, completionTokens);
+      sessionTally(promptTokens, completionTokens);
       if (useHistory) pushHistory(prompt, content);
       console.error(`[sonar] tokens — prompt: ${promptTokens}, completion: ${completionTokens}`);
-      return { content: [{ type: "text", text: `[routed to ${model}]\n\n${content}` }] };
+      return { content: [{ type: "text", text:
+        `[routed to ${model}]\n\n${content}` +
+        sonarFooter(promptTokens, completionTokens) }] };
     }
 
     throw new Error(`Unknown tool: ${name}`);

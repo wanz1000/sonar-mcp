@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-06-04
+
+### Added
+- **Token footer on every Sonar response** — each `sonar` reply now ends with a one-line summary showing: tokens used for this query, % of a Claude Pro session, running session total, cumulative % used, estimated $ saved, and request count for this session. Session counters reset on each Claude Desktop restart.
+
 ## [1.8.0] - 2026-06-04
 
 ### Added
