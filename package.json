@@ -1,13 +1,14 @@
 {
   "name": "sonar-mcp",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "MCP server that connects Claude Desktop to local Ollama models with auto-routing and live web search.",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "setup":  "node install.js",
-    "update": "node install.js --update",
-    "start":  "node index.js"
+    "setup":        "node install.js",
+    "setup-search": "node setup-search.js",
+    "update":       "node install.js --update",
+    "start":        "node index.js"
   },
   "engines": {
     "node": ">=18"

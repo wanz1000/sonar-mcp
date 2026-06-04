@@ -10,11 +10,18 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { execSync, spawnSync } from "child_process";
 
-const __dirname   = path.dirname(fileURLToPath(import.meta.url));
-const STATS_FILE  = path.join(__dirname, "token-stats.json");
-const CONFIG_FILE = path.join(__dirname, "sonar.config.json");
-const INSTALL_JS  = path.join(__dirname, "install.js");
-const GITHUB_RAW  = "https://raw.githubusercontent.com/wanz1000/sonar-mcp/main";
+const __dirname    = path.dirname(fileURLToPath(import.meta.url));
+const STATS_FILE   = path.join(__dirname, "token-stats.json");
+const CONFIG_FILE  = path.join(__dirname, "sonar.config.json");
+const SECRETS_FILE = path.join(__dirname, "sonar.secrets.json");
+const INSTALL_JS   = path.join(__dirname, "install.js");
+const GITHUB_RAW   = "https://raw.githubusercontent.com/wanz1000/sonar-mcp/main";
+
+function loadSecrets() {
+  try { return JSON.parse(fs.readFileSync(SECRETS_FILE, "utf8")); }
+  catch { return {}; }
+}
+const SECRETS = loadSecrets();
 const PKG        = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
 const VERSION    = PKG.version;
 
@@ -76,13 +83,17 @@ function loadConfig() {
   if (!fs.existsSync(CONFIG_FILE)) return DEFAULT_CONFIG;
   try {
     const u = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+    // Keys come from sonar.secrets.json first, then fall back to config (legacy)
+    const s = SECRETS;
     return {
       ...DEFAULT_CONFIG, ...u,
-      models:           { ...DEFAULT_CONFIG.models,  ...(u.models  || {}) },
-      search:           { ...DEFAULT_CONFIG.search,  ...(u.search  || {}),
-                          braveApiKey: (u.search?.braveApiKey ?? DEFAULT_CONFIG.search.braveApiKey),
-                          searxngUrl:  (u.search?.searxngUrl  ?? DEFAULT_CONFIG.search.searxngUrl) },
-      pricing:          { ...DEFAULT_CONFIG.pricing, ...(u.pricing || {}) },
+      models:  { ...DEFAULT_CONFIG.models,  ...(u.models  || {}) },
+      search:  { ...DEFAULT_CONFIG.search,  ...(u.search  || {}),
+                 braveApiKey:  s.braveApiKey  || u.search?.braveApiKey  || "",
+                 tavilyApiKey: s.tavilyApiKey || u.search?.tavilyApiKey || "",
+                 serpapiApiKey:s.serpapiApiKey|| u.search?.serpapiApiKey|| "",
+                 searxngUrl:   u.search?.searxngUrl ?? DEFAULT_CONFIG.search.searxngUrl },
+      pricing: { ...DEFAULT_CONFIG.pricing, ...(u.pricing || {}) },
       numCtx:           u.numCtx           ?? DEFAULT_CONFIG.numCtx,
       useMmap:          u.useMmap          ?? DEFAULT_CONFIG.useMmap,
       autoSelectModels: u.autoSelectModels ?? DEFAULT_CONFIG.autoSelectModels,
@@ -368,6 +379,39 @@ async function engineDdgInstant(query) {
   return out;
 }
 
+// Engine 3 — Tavily AI Search (key from sonar.secrets.json)
+async function engineTavily(query) {
+  const key = (CONFIG.search.tavilyApiKey || "").trim();
+  if (!key) return [];
+  const res = await fetchWithTimeout("https://api.tavily.com/search", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+    body:    JSON.stringify({ query, max_results: 5, search_depth: "basic" }),
+  }, 12000);
+  if (!res.ok) throw new Error(`Tavily returned HTTP ${res.status}`);
+  const data = await res.json();
+  return (data?.results || []).slice(0, 5).map(r => ({
+    title:   r.title   || "",
+    snippet: r.content || "",
+    url:     r.url     || "",
+  }));
+}
+
+// Engine 6 — SerpAPI (Google results via paid API key from sonar.secrets.json)
+async function engineSerpapi(query) {
+  const key = (CONFIG.search.serpapiApiKey || "").trim();
+  if (!key) return [];
+  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&num=5&api_key=${key}`;
+  const res  = await fetchWithTimeout(url, {}, 12000);
+  if (!res.ok) throw new Error(`SerpAPI returned HTTP ${res.status}`);
+  const data = await res.json();
+  return (data?.organic_results || []).slice(0, 5).map(r => ({
+    title:   r.title   || "",
+    snippet: r.snippet || "",
+    url:     r.link    || "",
+  }));
+}
+
 // Engine 5 — SearXNG (self-hosted meta-search) — only if a URL is configured
 async function engineSearxng(query) {
   const base = (CONFIG.search.searxngUrl || "").replace(/\/$/, "");
@@ -384,6 +428,8 @@ async function engineSearxng(query) {
 
 const ALL_ENGINES = {
   "brave":       engineBrave,
+  "tavily":      engineTavily,
+  "serpapi":     engineSerpapi,
   "wikipedia":   engineWikipedia,
   "ddg-instant": engineDdgInstant,
   "searxng":     engineSearxng,
@@ -400,8 +446,10 @@ async function multiSearch(query) {
   let engineNames = Array.isArray(CONFIG.search.engines) && CONFIG.search.engines.length
     ? CONFIG.search.engines.filter(n => ALL_ENGINES[n])
     : ["brave", "wikipedia", "ddg-instant", "searxng"];
-  if (!CONFIG.search.searxngUrl)  engineNames = engineNames.filter(n => n !== "searxng");
-  if (!CONFIG.search.braveApiKey) engineNames = engineNames.filter(n => n !== "brave");
+  if (!CONFIG.search.searxngUrl)   engineNames = engineNames.filter(n => n !== "searxng");
+  if (!CONFIG.search.braveApiKey)  engineNames = engineNames.filter(n => n !== "brave");
+  if (!CONFIG.search.tavilyApiKey) engineNames = engineNames.filter(n => n !== "tavily");
+  if (!CONFIG.search.serpapiApiKey)engineNames = engineNames.filter(n => n !== "serpapi");
 
   console.error(`[sonar/web] multi-engine search (${engineNames.join(", ")}): ${query}`);
   const settled = await Promise.allSettled(engineNames.map(n => ALL_ENGINES[n](query)));
@@ -589,12 +637,25 @@ async function healthCheck() {
   lines.push(``);
   let engs = Array.isArray(CONFIG.search.engines) && CONFIG.search.engines.length
     ? [...CONFIG.search.engines]
-    : ["duckduckgo", "duckduckgo-lite", "wikipedia", "ddg-instant", "searxng"];
-  if (!CONFIG.search.searxngUrl) engs = engs.filter(n => n !== "searxng");
-  const braveStatus = CONFIG.search.braveApiKey ? "✅ key set" : "⚠️  no key — get one free at https://api.search.brave.com/register";
-  lines.push(`  Search   : ${engs.length} engine(s) — ${engs.join(", ")}`);
-  lines.push(`  Brave    : ${braveStatus}`);
-  if (CONFIG.search.searxngUrl) lines.push(`  SearXNG  : ${CONFIG.search.searxngUrl}`);
+    : ["wikipedia", "ddg-instant"];
+  if (!CONFIG.search.searxngUrl)   engs = engs.filter(n => n !== "searxng");
+  if (!CONFIG.search.braveApiKey)  engs = engs.filter(n => n !== "brave");
+  if (!CONFIG.search.tavilyApiKey) engs = engs.filter(n => n !== "tavily");
+  if (!CONFIG.search.serpapiApiKey)engs = engs.filter(n => n !== "serpapi");
+
+  const keyStatus = (key, name, url) =>
+    key ? `✅ key set` : `⚠️  no key — run: node setup-search.js  (free at ${url})`;
+
+  lines.push(`  Search   : ${engs.length} engine(s) active — ${engs.join(", ")}`);
+  if (CONFIG.search.engines?.includes("brave"))
+    lines.push(`  Brave    : ${keyStatus(CONFIG.search.braveApiKey,  "Brave",  "api.search.brave.com/register")}`);
+  if (CONFIG.search.engines?.includes("tavily"))
+    lines.push(`  Tavily   : ${keyStatus(CONFIG.search.tavilyApiKey, "Tavily", "app.tavily.com")}`);
+  if (CONFIG.search.engines?.includes("serpapi"))
+    lines.push(`  SerpAPI  : ${keyStatus(CONFIG.search.serpapiApiKey,"SerpAPI","serpapi.com")}`);
+  if (CONFIG.search.searxngUrl)
+    lines.push(`  SearXNG  : ${CONFIG.search.searxngUrl}`);
+  lines.push(`  Setup    : run "node setup-search.js" to add/change engines or keys`);
   lines.push(`  History  : keeps last ${CONFIG.historyTurns} exchange(s) when use_history is on`);
   return lines.join("\n");
 }

@@ -1,3 +1,4 @@
 node_modules/
 token-stats.json
 sonar.config.json
+sonar.secrets.json

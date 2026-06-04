@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-06-04
+
+### Added
+- **`setup-search.js` wizard** (`npm run setup-search`) — interactive guided setup for all search engines. Detects Docker, installs SearXNG, handles Docker Desktop launch, explains opt-out consequences.
+- **Tavily AI Search engine** — AI-optimised results, 1,000 free queries/month. Configured via wizard.
+- **SerpAPI engine** — Google/Bing results via paid API. Configured via wizard.
+- **`sonar.secrets.json`** — keys are now stored in a separate gitignored file with OS-level user-only permissions (via `icacls`). Keys are never in `sonar.config.json` or the repo.
+- **`npm run setup-search`** shortcut added to `package.json`.
+
+### Changed
+- `sonar_health` now shows status of all configured engines and directs to `node setup-search.js` for setup.
+- `multiSearch` skips Tavily/SerpAPI when no key is present (same pattern as Brave).
+- `loadConfig` reads keys from `sonar.secrets.json` first, falling back to config for legacy setups.
+
 ## [1.6.0] - 2026-06-04
 
 ### Added
