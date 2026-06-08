@@ -2,7 +2,11 @@
 
 A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop** to local **Ollama** models. One tool — `sonar` — automatically routes every prompt to the right model, including live web search when needed. Free, fast, and runs entirely on your GPU.
 
-> 🎉 **New in v1.19.0**
+> 🎉 **New in v1.20.0**
+> - 🔁 **Auto-upgrade** — Sonar checks GitHub for updates at every startup and logs when a new version is available. Enable `autoUpdate: true` in `sonar.config.json` + `SONAR_ALLOW_UPDATE=1` to apply updates automatically. The installer now asks "Enable in-chat updates?" and wires everything in for you.
+> - 💬 **In-chat updates** — `sonar_update_check` shows what's new; `sonar_update` applies it without leaving Claude Desktop (opt-in via installer or manual config)
+>
+> **Also in recent releases:**
 > - 🧠 **VRAM-safe model auto-selection** — jointly picks the best model pair that fits in free GPU VRAM; never oversubscribes
 > - 🔄 **Self-healing crash recovery** — on OOM or model crash, automatically downgrades to the next smaller model and retries
 > - 🐳 **Docker/SearXNG auto-start** — starts Docker Desktop and the SearXNG container automatically at startup and on demand
