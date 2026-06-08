@@ -50,6 +50,11 @@ const DEFAULT_CONFIG = {
                                 //   away and pin the GPU indefinitely.
   inferenceTimeoutMs: 120000,   // hard wall-clock limit per generation; on timeout the request
                                 //   is aborted (stream mode lets Ollama cancel the GPU work).
+  autoUpdateCheck: true,        // silently check GitHub for a newer version at startup and log to
+                                //   stderr if one is available. Zero network cost if already current.
+  autoUpdate: false,            // auto-apply the update at startup when SONAR_ALLOW_UPDATE=1 is
+                                //   also set. Safe default is false — set true in sonar.config.json
+                                //   to opt in. Has no effect without SONAR_ALLOW_UPDATE=1.
   search: {
     // Which engines to query in parallel. Omit / empty = all available.
     // Valid: "brave", "wikipedia", "ddg-instant", "searxng"
@@ -114,6 +119,8 @@ function loadConfig() {
       maxPromptChars:          u.maxPromptChars          ?? DEFAULT_CONFIG.maxPromptChars,
       maxOutputTokens:         u.maxOutputTokens         ?? DEFAULT_CONFIG.maxOutputTokens,
       inferenceTimeoutMs:      u.inferenceTimeoutMs      ?? DEFAULT_CONFIG.inferenceTimeoutMs,
+      autoUpdateCheck:         u.autoUpdateCheck         ?? DEFAULT_CONFIG.autoUpdateCheck,
+      autoUpdate:              u.autoUpdate              ?? DEFAULT_CONFIG.autoUpdate,
     };
   } catch (e) {
     console.error(`[sonar] sonar.config.json is invalid (${e.message}) — using defaults`);
@@ -871,13 +878,21 @@ class Semaphore {
   constructor(max) { this.max = Math.max(1, max | 0); this.active = 0; this.queue = []; }
   async acquire() {
     if (this.active < this.max) { this.active++; return; }
+    // Slot will be TRANSFERRED by release() — do NOT increment active here.
+    // Incrementing after the await would create a race: release() decrements to
+    // max-1, a new acquire() slips in and increments to max, then the woken
+    // waiter increments to max+1, exceeding the concurrency limit.
     await new Promise(resolve => this.queue.push(resolve));
-    this.active++;
   }
   release() {
-    this.active--;
     const next = this.queue.shift();
-    if (next) next();
+    if (next) {
+      // Transfer the slot to the waiting caller — active count is unchanged.
+      next();
+    } else {
+      // No waiters — actually free the slot.
+      this.active--;
+    }
   }
 }
 const inferenceGate = new Semaphore(CONFIG.maxConcurrentInferences);
@@ -1467,7 +1482,10 @@ async function checkForUpdate() {
   try {
     const clRes = await fetchWithTimeout(`${GITHUB_RAW}/CHANGELOG.md`, {}, 10000);
     if (clRes.ok) {
-      const sections = extractChangelogSections(await clRes.text(), VERSION, latest);
+      // Use readCapped (512 KB) — consistent with every other external response read.
+      // clRes.text() is unbounded and could OOM on a huge/malformed CHANGELOG.
+      const clBuf  = await readCapped(clRes, 512 * 1024);
+      const sections = extractChangelogSections(clBuf.toString("utf8"), VERSION, latest);
       if (sections) {
         lines.push(`  What's new:`, ``);
         for (const l of sections.split("\n")) lines.push(`  ${l}`);
@@ -1744,6 +1762,36 @@ MODELS = await resolveModels();
 // Logs progress to stderr; any failure is non-fatal.
 if (CONFIG.search.searxngUrl) {
   ensureSearxng().catch(e => console.error(`[sonar/docker] startup check error: ${e.message}`));
+}
+
+// Background update check — runs silently, never blocks startup.
+// If autoUpdate is also true AND SONAR_ALLOW_UPDATE=1, applies the update automatically.
+if (CONFIG.autoUpdateCheck) {
+  (async () => {
+    try {
+      const result = await checkForUpdate();
+      const newVersionLine = result.split("\n").find(l => /is available/i.test(l));
+      if (!newVersionLine) return;  // already current
+
+      console.error(`[sonar/update] 🆕 ${newVersionLine.trim()}`);
+
+      if (CONFIG.autoUpdate && ALLOW_UPDATE) {
+        console.error("[sonar/update] autoUpdate=true + SONAR_ALLOW_UPDATE=1 — applying update now...");
+        try {
+          const msg = await runUpdate();
+          console.error(`[sonar/update] ${msg.split("\n")[0]}`);
+          console.error("[sonar/update] Restart Claude Desktop to load the new version.");
+        } catch (e) {
+          console.error(`[sonar/update] auto-update failed: ${e.message}`);
+        }
+      } else if (CONFIG.autoUpdate && !ALLOW_UPDATE) {
+        console.error("[sonar/update] autoUpdate=true but SONAR_ALLOW_UPDATE=1 is not set — skipping auto-apply.");
+        console.error("[sonar/update] Set SONAR_ALLOW_UPDATE=1 in the MCP server env (npm run setup) to enable.");
+      } else {
+        console.error("[sonar/update] Run sonar_update_check in Claude Desktop for details and to update.");
+      }
+    } catch { /* network unavailable — silently skip */ }
+  })();
 }
 
 const transport = new StdioServerTransport();

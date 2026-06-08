@@ -385,6 +385,26 @@ const existingModels = await listOllamaModels();
 const needPull = ["llama3.1:8b", "qwen2.5-coder:7b"].filter(m => !existingModels.includes(m));
 const needNpm  = !fs.existsSync(path.join(NODE_MODS, "@modelcontextprotocol"));
 
+// Ask about in-chat updates before printing the plan
+head("Optional: in-chat updates");
+console.log(`  By default, running ${BOLD("sonar_update")} from inside Claude Desktop is disabled for`);
+console.log(`  security (it runs git pull + npm install). You can always update from a`);
+console.log(`  terminal with ${BOLD("npm run update")} without enabling this.`);
+console.log(``);
+console.log(`  Enabling adds ${BOLD("SONAR_ALLOW_UPDATE=1")} to the MCP server environment, which`);
+console.log(`  exposes the sonar_update tool inside Claude Desktop and also lets`);
+console.log(`  ${BOLD("autoUpdate: true")} in sonar.config.json take effect at startup.`);
+console.log(``);
+const enableUpdate = AUTO_YES
+  ? false  // --yes default: don't enable (stay secure by default)
+  : (await ask(`  Enable in-chat updates? [y/N] `, "n")) === "y";
+
+if (enableUpdate) {
+  info("In-chat updates ENABLED — SONAR_ALLOW_UPDATE=1 will be added to MCP env.");
+} else {
+  info("In-chat updates disabled (default). Use \"npm run update\" in a terminal to update.");
+}
+
 head("Here's what this installer will do");
 const plan = [];
 if (needNpm) plan.push(`Run "npm install" (adds ./node_modules — reversible)`);
@@ -400,6 +420,9 @@ if (configExists) {
   plan.push(`Add ONE entry ("ollama-local") to your existing claude_desktop_config.json — all other entries preserved, original backed up first`);
 } else {
   plan.push(`Create a new claude_desktop_config.json with just the sonar-mcp entry`);
+}
+if (enableUpdate) {
+  plan.push(`Add SONAR_ALLOW_UPDATE=1 to the MCP server env (enables sonar_update in Claude Desktop)`);
 }
 plan.push(`Verify the MCP server starts cleanly`);
 if (sonarAlreadyInClaudeMd()) {
@@ -466,15 +489,21 @@ if (configExists) {
 
 if (!config.mcpServers) config.mcpServers = {};
 const wasThere = !!config.mcpServers["ollama-local"];
-config.mcpServers["ollama-local"] = {
+const mcpEntry = {
   command: process.execPath,
   args: [INDEX_JS],
-  alwaysAllow: ["sonar", "sonar_stats", "sonar_health"],
+  alwaysAllow: ["sonar", "sonar_stats", "sonar_health", "sonar_update_check",
+                ...(enableUpdate ? ["sonar_update"] : [])],
 };
+if (enableUpdate) {
+  mcpEntry.env = { SONAR_ALLOW_UPDATE: "1" };
+}
+config.mcpServers["ollama-local"] = mcpEntry;
 
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 SNAPSHOT.configWasModified = true;
 ok(wasThere ? "Updated existing ollama-local entry" : "Added ollama-local entry");
+if (enableUpdate) ok("SONAR_ALLOW_UPDATE=1 added to MCP server env");
 info(`Using Node at: ${process.execPath}`);
 
 // ── STEP 4: Verify server starts ──────────────────────────────────────────────

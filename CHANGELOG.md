@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] - 2026-06-08
+
+### Added — auto-upgrade feature
+- **Startup update check** (`autoUpdateCheck: true` default) — at server start, Sonar silently checks GitHub for a newer version in the background and logs to stderr if one is found. Zero cost when already current; non-blocking so startup is instant.
+- **Auto-apply at startup** (`autoUpdate: false` default) — when set to `true` in `sonar.config.json` AND `SONAR_ALLOW_UPDATE=1` is present in the environment, Sonar automatically runs `git pull + npm install` at startup whenever a newer version is detected. Safe default is `false`; opt in by setting both.
+- **Installer prompts for in-chat updates** — `npm run setup` now asks "Enable in-chat updates?" If yes, it bakes `SONAR_ALLOW_UPDATE=1` into the MCP server's env block in `claude_desktop_config.json` and adds `sonar_update` to `alwaysAllow`, making the update tool available inside Claude Desktop without any manual env-var step.
+- **`sonar_update_check` added to `alwaysAllow`** in the installer-generated MCP config so the read-only check tool is always pre-approved.
+- **`sonar.config.example.json` updated** — documents `autoUpdateCheck`, `autoUpdate`, all resource-governance keys, and updated default model names.
+
 ## [1.19.0] - 2026-06-07
 
 ### Security — close model-invokable RCE / supply-chain vectors
