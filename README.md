@@ -168,19 +168,47 @@ Fully quit (system tray / menu bar) and reopen.
 
 ## 🔄 Updating
 
+### From a terminal (always available)
+
 ```bash
 npm run update
 ```
 
-This fetches and shows incoming commits, asks for confirmation, re-installs deps if needed, and verifies the server starts before finishing. Restart Claude Desktop after updating.
+Fetches and shows incoming commits, asks for confirmation, re-installs deps if needed, and verifies the server starts before finishing. Restart Claude Desktop after updating.
 
-To enable in-Claude updates (from inside a conversation):
+### From inside Claude Desktop (optional)
 
-```bash
-SONAR_ALLOW_UPDATE=1 node index.js
+During `npm run setup`, the installer asks:
+
+```
+Enable in-chat updates? [y/N]
 ```
 
-Then use `sonar_update_check` to see what's new and `sonar_update` to apply it.
+Say **yes** and it wires `SONAR_ALLOW_UPDATE=1` into the MCP server environment automatically. After restarting Claude Desktop you can then run:
+
+- **`sonar_update_check`** — see if a newer version is available and what changed
+- **`sonar_update`** — pull and apply the update without leaving the conversation
+
+To enable it on an existing install without re-running setup, add `"env": {"SONAR_ALLOW_UPDATE": "1"}` to the `ollama-local` entry in `claude_desktop_config.json` and restart Claude Desktop.
+
+### Automatic startup check
+
+Sonar checks GitHub for updates silently every time it starts (controlled by `autoUpdateCheck` in `sonar.config.json`, default `true`). If a newer version exists, it logs to stderr:
+
+```
+[sonar/update] 🆕 v1.21.0 is available (you have v1.20.0)
+[sonar/update] Run sonar_update_check in Claude Desktop for details and to update.
+```
+
+### Fully automatic updates at startup
+
+To have Sonar apply updates automatically on startup, set in `sonar.config.json`:
+
+```json
+"autoUpdate": true
+```
+
+This requires `SONAR_ALLOW_UPDATE=1` to also be set (via the installer or manually). With both in place, Sonar will `git pull + npm install` in the background whenever a newer version is detected at startup.
 
 ---
 
