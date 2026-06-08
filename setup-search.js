@@ -142,8 +142,10 @@ function dockerInstalled() {
 
 function searxngRunning(url) {
   try {
+    // Pass the URL as a discrete argv element with shell:false (the default) so
+    // shell metacharacters in a config-supplied URL can't break out into execution.
     const r = spawnSync("curl", ["-sf", "--max-time", "3", `${url}/healthz`],
-      { encoding: "utf8", shell: true });
+      { encoding: "utf8" });
     return r.status === 0;
   } catch { return false; }
 }
