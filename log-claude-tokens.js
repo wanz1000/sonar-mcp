@@ -109,7 +109,16 @@ function updateStats(sessionDate, sessionId, peakInput, totalOutput) {
   }
 
   stats = pruneStats(stats);
-  fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2));
+  // Atomic write (temp + rename) — this hook process and the Sonar MCP server can
+  // write token-stats.json concurrently; rename is atomic so neither sees a torn file.
+  const tmp = `${STATS_FILE}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(stats, null, 2));
+    fs.renameSync(tmp, STATS_FILE);
+  } catch (e) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
+    throw e;
+  }
 
   return { peakInput, totalOutput, sessionDate };
 }

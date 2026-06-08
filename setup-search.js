@@ -42,11 +42,31 @@ function loadJson(file, fallback = {}) {
 }
 
 function saveJson(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n", "utf8");
-  // Attempt to restrict file permissions on Windows (best-effort)
-  try {
-    execSync(`icacls "${file}" /inheritance:r /grant:r "${process.env.USERNAME}:(R,W)" 2>nul`, { shell: true });
-  } catch { /* non-fatal */ }
+  // Atomic write so a crash mid-write can't leave a half-written secrets file.
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
+  fs.renameSync(tmp, file);
+
+  // Restrict permissions to the current user (Windows). Use spawnSync with an arg
+  // array — NOT a shell string — so the username/path can't break out of the command.
+  // Verify it actually applied; warn loudly if not (a silent failure could leave a
+  // secrets file readable by other accounts on a shared machine).
+  if (process.platform === "win32") {
+    const user = process.env.USERNAME || process.env.USER;
+    let restricted = false;
+    if (user) {
+      try {
+        const r = spawnSync("icacls", [
+          file, "/inheritance:r", "/grant:r", `${user}:(R,W)`,
+        ], { timeout: 8000, encoding: "utf8" });
+        restricted = r.status === 0;
+      } catch { /* fall through to warning */ }
+    }
+    if (!restricted) {
+      console.warn(`⚠️  Could not restrict permissions on ${file}. ` +
+        `If this is a shared machine, secure it manually so only you can read it.`);
+    }
+  }
 }
 
 // ── Input helpers ─────────────────────────────────────────────────────────────
@@ -122,8 +142,10 @@ function dockerInstalled() {
 
 function searxngRunning(url) {
   try {
+    // Pass the URL as a discrete argv element with shell:false (the default) so
+    // shell metacharacters in a config-supplied URL can't break out into execution.
     const r = spawnSync("curl", ["-sf", "--max-time", "3", `${url}/healthz`],
-      { encoding: "utf8", shell: true });
+      { encoding: "utf8" });
     return r.status === 0;
   } catch { return false; }
 }

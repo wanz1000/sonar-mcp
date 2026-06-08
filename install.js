@@ -56,19 +56,49 @@ async function ask(question, defaultAnswer = "") {
 
 // ── CLAUDE.md helpers ─────────────────────────────────────────────────────────
 const CLAUDE_MD_PATH   = path.join(os.homedir(), ".claude", "CLAUDE.md");
-const SONAR_MD_MARKER  = "<!-- sonar-mcp -->";
+const SONAR_MD_MARKER  = "<!-- sonar-mcp-v2 -->";
 const SONAR_MD_BLOCK   = `
 ${SONAR_MD_MARKER}
-## Sonar — Local LLM (always use first)
+## Sonar — Local LLM (always use first, always self-heal)
 
 Sonar is installed as an MCP tool (\`mcp__ollama-local__sonar\`).
-**Always route questions and reasoning through Sonar before responding**,
-including when the task is about modifying Sonar itself.
 
-- General questions  → \`sonar(prompt, model="simple")\`
-- Code questions     → \`sonar(prompt, model="coder")\`
-- After each answer  → call \`sonar_stats\` to show token usage
-<!-- /sonar-mcp -->
+### Always use Sonar
+**Route every question and reasoning step through Sonar before responding**,
+including when the task is modifying Sonar itself.
+
+- General questions → \`sonar(prompt, model="simple")\`
+- Code questions    → \`sonar(prompt, model="coder")\`
+- Web / live data   → \`sonar(prompt, model="web")\`
+- After each answer → call \`sonar_stats\` to show token savings
+
+### Self-heal when something isn't working
+If a Sonar call fails or a dependency is missing, **fix it — do not give up**.
+Work through this checklist, fixing each layer before moving on:
+
+1. **Ollama not reachable** (\`ECONNREFUSED\` on port 11434)
+   - Windows: \`Start-Process (Get-Command ollama).Source\` or launch the Ollama tray app.
+   - Confirm: \`ollama list\`
+
+2. **Model missing** ("model not found / try pulling")
+   - Run \`ollama pull <model>\` for each missing model.
+   - Then restart Claude Desktop so Sonar re-resolves models.
+
+3. **SearXNG not reachable** (\`ECONNREFUSED\` on port 8888)
+   - Sonar auto-recovers: it starts Docker Desktop and the container automatically.
+   - If that fails, run manually: \`docker start searxng\`
+   - If the container doesn't exist: \`docker run -d --name searxng --restart unless-stopped -p 8888:8080 -e SEARXNG_BASE_URL="http://localhost:8888/" searxng/searxng:latest\`
+
+4. **Docker not installed**
+   - Download Docker Desktop from https://docs.docker.com/desktop/install/windows-install/
+   - Install it, then re-run \`node C:/LocalLLM/mcp-server/setup-search.js\`
+
+5. **Sonar MCP itself not responding**
+   - Fully restart Claude Desktop (quit from system tray, reopen).
+   - If still broken, run \`node C:/LocalLLM/mcp-server/install.js\` to re-verify the install.
+
+6. **sonar_health always available** — call it any time to see what's broken.
+<!-- /sonar-mcp-v2 -->
 `;
 
 function sonarAlreadyInClaudeMd() {
@@ -214,6 +244,16 @@ if (UPDATE) {
     panicAndExit("not a git checkout — cannot use --update", 1);
   }
 
+  // SECURITY: verify we're pulling from the expected upstream, not a hijacked remote.
+  // (A tampered .git/config could otherwise redirect the pull to attacker-controlled code.)
+  const EXPECTED_REMOTE = /github\.com[:/]wanz1000\/sonar-mcp(\.git)?$/i;
+  const remoteUrl = (spawnSync("git", ["remote", "get-url", "origin"],
+    { cwd: __dirname, encoding: "utf8" }).stdout || "").trim();
+  if (!EXPECTED_REMOTE.test(remoteUrl)) {
+    panicAndExit(`refusing to update: 'origin' is '${remoteUrl}', not the expected ` +
+                 `github.com/wanz1000/sonar-mcp. Fix your git remote or update manually.`, 1);
+  }
+
   // Warn if local changes would conflict
   const status = spawnSync("git", ["status", "--porcelain"], { cwd: __dirname, encoding: "utf8" });
   if ((status.stdout || "").trim().length > 0) {
@@ -260,8 +300,10 @@ if (UPDATE) {
   // Re-run npm install if package.json or package-lock changed
   const changed = spawnSync("git", ["diff", "--name-only", "HEAD@{1}", "HEAD"], { cwd: __dirname, encoding: "utf8" }).stdout;
   if (/package(-lock)?\.json/.test(changed)) {
-    info("Dependencies changed — running npm install...");
-    const np = spawnSync("npm", ["install"], { cwd: __dirname, stdio: "inherit", shell: true });
+    info("Dependencies changed — running npm install (scripts disabled)...");
+    // --ignore-scripts blocks arbitrary pre/post-install code execution from a pulled
+    // dependency tree — defense in depth for the auto-update path.
+    const np = spawnSync("npm", ["install", "--ignore-scripts"], { cwd: __dirname, stdio: "inherit", shell: true });
     if (np.status !== 0) panicAndExit("npm install failed after pull", 1);
     ok("Dependencies updated");
   } else {
@@ -343,6 +385,26 @@ const existingModels = await listOllamaModels();
 const needPull = ["llama3.1:8b", "qwen2.5-coder:7b"].filter(m => !existingModels.includes(m));
 const needNpm  = !fs.existsSync(path.join(NODE_MODS, "@modelcontextprotocol"));
 
+// Ask about in-chat updates before printing the plan
+head("Optional: in-chat updates");
+console.log(`  By default, running ${BOLD("sonar_update")} from inside Claude Desktop is disabled for`);
+console.log(`  security (it runs git pull + npm install). You can always update from a`);
+console.log(`  terminal with ${BOLD("npm run update")} without enabling this.`);
+console.log(``);
+console.log(`  Enabling adds ${BOLD("SONAR_ALLOW_UPDATE=1")} to the MCP server environment, which`);
+console.log(`  exposes the sonar_update tool inside Claude Desktop and also lets`);
+console.log(`  ${BOLD("autoUpdate: true")} in sonar.config.json take effect at startup.`);
+console.log(``);
+const enableUpdate = AUTO_YES
+  ? false  // --yes default: don't enable (stay secure by default)
+  : (await ask(`  Enable in-chat updates? [y/N] `, "n")) === "y";
+
+if (enableUpdate) {
+  info("In-chat updates ENABLED — SONAR_ALLOW_UPDATE=1 will be added to MCP env.");
+} else {
+  info("In-chat updates disabled (default). Use \"npm run update\" in a terminal to update.");
+}
+
 head("Here's what this installer will do");
 const plan = [];
 if (needNpm) plan.push(`Run "npm install" (adds ./node_modules — reversible)`);
@@ -358,6 +420,9 @@ if (configExists) {
   plan.push(`Add ONE entry ("ollama-local") to your existing claude_desktop_config.json — all other entries preserved, original backed up first`);
 } else {
   plan.push(`Create a new claude_desktop_config.json with just the sonar-mcp entry`);
+}
+if (enableUpdate) {
+  plan.push(`Add SONAR_ALLOW_UPDATE=1 to the MCP server env (enables sonar_update in Claude Desktop)`);
 }
 plan.push(`Verify the MCP server starts cleanly`);
 if (sonarAlreadyInClaudeMd()) {
@@ -424,15 +489,21 @@ if (configExists) {
 
 if (!config.mcpServers) config.mcpServers = {};
 const wasThere = !!config.mcpServers["ollama-local"];
-config.mcpServers["ollama-local"] = {
+const mcpEntry = {
   command: process.execPath,
   args: [INDEX_JS],
-  alwaysAllow: ["sonar", "sonar_stats", "sonar_health"],
+  alwaysAllow: ["sonar", "sonar_stats", "sonar_health", "sonar_update_check",
+                ...(enableUpdate ? ["sonar_update"] : [])],
 };
+if (enableUpdate) {
+  mcpEntry.env = { SONAR_ALLOW_UPDATE: "1" };
+}
+config.mcpServers["ollama-local"] = mcpEntry;
 
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 SNAPSHOT.configWasModified = true;
 ok(wasThere ? "Updated existing ollama-local entry" : "Added ollama-local entry");
+if (enableUpdate) ok("SONAR_ALLOW_UPDATE=1 added to MCP server env");
 info(`Using Node at: ${process.execPath}`);
 
 // ── STEP 4: Verify server starts ──────────────────────────────────────────────
@@ -452,7 +523,9 @@ if (sonarAlreadyInClaudeMd()) {
   ok("Sonar instruction already in ~/.claude/CLAUDE.md — skipping");
 } else {
   fs.mkdirSync(path.dirname(CLAUDE_MD_PATH), { recursive: true });
-  const existing = fs.existsSync(CLAUDE_MD_PATH) ? fs.readFileSync(CLAUDE_MD_PATH, "utf8") : "";
+  let existing = fs.existsSync(CLAUDE_MD_PATH) ? fs.readFileSync(CLAUDE_MD_PATH, "utf8") : "";
+  // Remove any old v1 sonar block so we don't accumulate duplicates on upgrade
+  existing = existing.replace(/\n?<!-- sonar-mcp -->[\s\S]*?<!-- \/sonar-mcp -->\n?/g, "");
   fs.writeFileSync(CLAUDE_MD_PATH, existing + SONAR_MD_BLOCK, "utf8");
   SNAPSHOT.claudeMdModified = true;
   ok(`Sonar-first instruction written to ~/.claude/CLAUDE.md`);

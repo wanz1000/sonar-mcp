@@ -2,18 +2,25 @@
   "_comment": "Copy this file to sonar.config.json to override defaults. All keys are optional.",
   "ollamaUrl": "http://localhost:11434",
   "models": {
-    "simple": "llama3.1:8b",
-    "coder": "qwen2.5-coder:7b",
+    "simple": "gemma3:12b",
+    "coder": "qwen2.5-coder:14b",
     "vision": "gemma3:12b"
   },
   "autoSelectModels": true,
-  "numCtx": 4096,
+  "numCtx": 8192,
   "useMmap": true,
+  "maxConcurrentInferences": 1,
+  "maxPromptChars": 24000,
+  "maxOutputTokens": 1024,
+  "inferenceTimeoutMs": 120000,
+  "autoUpdateCheck": true,
+  "_autoUpdateCheck_comment": "Check GitHub for a newer version at startup (non-blocking, logs to stderr). Default: true.",
+  "autoUpdate": false,
+  "_autoUpdate_comment": "Auto-apply updates at startup. Requires SONAR_ALLOW_UPDATE=1 in the MCP server env (set via npm run setup). Default: false.",
   "search": {
-    "_comment": "engines run in parallel, results merged + deduped. brave requires braveApiKey. searxng requires searxngUrl.",
+    "_comment": "engines run in parallel, results merged + deduped. brave/tavily/serpapi require keys in sonar.secrets.json. searxng requires searxngUrl.",
     "engines": ["brave", "wikipedia", "ddg-instant", "searxng"],
-    "braveApiKey": "",
-    "searxngUrl": ""
+    "searxngUrl": "http://localhost:8888"
   },
   "pricing": {
     "inputPerMillion": 3.0,
