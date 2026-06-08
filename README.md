@@ -2,14 +2,17 @@
 
 A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop** to local **Ollama** models. One tool — `sonar` — automatically routes every prompt to the right model, including live web search when needed. Free, fast, and runs entirely on your GPU.
 
-> 🎉 **New in v1.1.0**
-> - 👁️ **Vision route** — ask about images by passing `image_path` (routed to `gemma3:12b`)
-> - 🌐 **Multi-engine web search** — DuckDuckGo, DuckDuckGo Lite, Wikipedia & Instant Answers queried *in parallel*, merged and de-duplicated; one engine failing no longer breaks search
-> - 🧠 **Conversation memory** — pass `use_history` to let sonar remember earlier turns
-> - 🎛️ **Per-request model override** — force a route with the `model` parameter
-> - 🩺 **`sonar_health` tool** — check Ollama status and which models are ready
-> - 💵 **Cost-savings estimate** — `sonar_stats` now shows the Claude API spend you've avoided
-> - ⚙️ **Config file** — `sonar.config.json` overrides models, search engines, pricing & more
+> 🎉 **New in v1.19.0**
+> - 🧠 **VRAM-safe model auto-selection** — jointly picks the best model pair that fits in free GPU VRAM; never oversubscribes
+> - 🔄 **Self-healing crash recovery** — on OOM or model crash, automatically downgrades to the next smaller model and retries
+> - 🐳 **Docker/SearXNG auto-start** — starts Docker Desktop and the SearXNG container automatically at startup and on demand
+> - 🔒 **Concurrency gate** — serializes GPU inference to prevent simultaneous model loads from wedging your PC
+> - ⚡ **Streaming inference + abort timeout** — stream-based responses with AbortController; stuck requests are killed cleanly
+> - 🛡️ **Security hardening** — SSRF guard (blocks loopback/private/metadata IPs), 5 MB fetch cap, atomic file writes, image allowlist, model-invokable update gated behind `SONAR_ALLOW_UPDATE=1`
+> - 📰 **Time-sensitive search freshness** — auto-detects news/current-events queries, applies `time_range=month` + newest-first ranking
+> - 📄 **Always-on article body fetch** — top 3 results always fetched in full, not just snippets
+> - 📊 **Token savings footer** — every `sonar` response ends with per-query and session-running token savings
+> - 🔢 **Doubled context window** — `numCtx` raised to 8192
 >
 > See the [changelog](CHANGELOG.md) for full details.
 
@@ -20,26 +23,33 @@ A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop
 ## ✨ Features
 
 - **Single `sonar` tool** — no need to pick a model manually. Routing happens automatically:
+
   | Prompt type | Model used |
   |---|---|
-  | General tasks (explain, summarize, translate, draft…) | `llama3.1:8b` |
-  | Coding tasks (write, debug, refactor, algorithms…) | `qwen2.5-coder:7b` |
+  | General tasks (explain, summarize, translate, draft…) | `gemma3:12b` (or best fit for your VRAM) |
+  | Coding tasks (write, debug, refactor, algorithms…) | `qwen2.5-coder:14b` (or best fit for your VRAM) |
   | Image questions (pass `image_path`) | `gemma3:12b` |
-  | Live/current info (news, weather, prices, URLs…) | Multi-engine web search → `llama3.1:8b` |
+  | Live/current info (news, weather, prices, URLs…) | Multi-engine web search → local model |
 
-- **Optional manual control** — override the route (`model`), attach an image (`image_path`), or carry context across calls (`use_history`). See [Usage](#-usage).
+- **GPU-aware VRAM auto-selection** — at startup Sonar reads free VRAM (`nvidia-smi`) and jointly selects the largest model pair that fits. If VRAM changes between requests, a per-request pre-check downgrades automatically rather than crashing.
 
-- **`sonar_stats` tool** — tokens processed locally *and* the estimated Claude API cost saved, by today / week / month / year.
+- **Self-healing everywhere** — OOM or model crash? Sonar downgrades and retries. Docker down? It starts it. SearXNG container missing? It creates it. Ollama not running? It tells you exactly how to fix it.
 
-- **`sonar_health` tool** — checks Ollama is reachable, shows what's loaded in VRAM, and verifies every configured model is pulled.
+- **Concurrency gate** — only one inference runs at a time. Parallel `sonar` calls queue cleanly instead of loading two large models simultaneously and exhausting VRAM.
 
-- **Configurable** — an optional [`sonar.config.json`](#-configuration) overrides models, search provider, pricing, and history depth without editing code.
+- **Rich web search** — queries SearXNG (7 engines: Google, DuckDuckGo, Bing, Brave, Mojeek, Startpage, Wikipedia) plus DuckDuckGo Instant Answers and Wikipedia in parallel. For news/current-events queries, applies a freshness filter and re-ranks by recency. Top 3 results are always fetched in full (article body), not just snippets.
 
-- **Robust multi-engine search** — the web route queries several search engines *in parallel* (DuckDuckGo, DuckDuckGo Lite, Wikipedia, DuckDuckGo Instant Answers, and optionally SearXNG), merges and de-duplicates the results. If one engine is down or rate-limited, the others still answer.
+- **`sonar_stats` tool** — tokens processed locally *and* estimated Claude API cost saved, by today / week / month / year. Automatically appended as a footer to every `sonar` response.
 
-- **VRAM-safe** — `keep_alive: 0` unloads each model immediately after a call so models never compete for VRAM.
+- **`sonar_health` tool** — checks Ollama reachability, shows what's loaded in VRAM, verifies every configured model is pulled, and reports Docker/SearXNG status.
 
-- **No API keys required** — every search engine used works without an API key (SearXNG optional, self-hosted).
+- **`sonar_update_check` / `sonar_update` tools** — check for new versions and apply updates from GitHub without leaving Claude Desktop (update requires `SONAR_ALLOW_UPDATE=1` env var).
+
+- **Configurable** — an optional [`sonar.config.json`](#️-configuration) overrides models, search providers, context window, pricing, and more without editing code.
+
+- **VRAM-safe** — `keep_alive: 0` unloads each model immediately after a call so models never idle in VRAM.
+
+- **No API keys required for core search** — SearXNG is self-hosted; Brave Search API key is optional for direct Brave queries.
 
 ---
 
@@ -47,30 +57,27 @@ A lightweight MCP (Model Context Protocol) server that connects **Claude Desktop
 
 ### You install these first (the installer cannot do these for you)
 
-- **Active Claude subscription** — [Claude Pro or Team](https://claude.ai/upgrade). Sonar offloads work from Claude to free local models, so it only makes sense if you're paying for Claude tokens.
+- **Active Claude subscription** — [Claude Pro or Team](https://claude.ai/upgrade).
 - **[Claude Desktop](https://claude.ai/download)** — the desktop app (not the web version), signed in to your account.
-- **[Node.js](https://nodejs.org) 18 or later** — needed to run the installer itself. Verify with `node --version`.
-- **[Ollama](https://ollama.com)** — install the app, then launch it once so it's running (Windows tray icon / macOS menu bar). Models are pulled by the installer below.
-- **A GPU with ~8 GB VRAM** (recommended) — Ollama auto-detects NVIDIA, AMD, and Apple Silicon. Sonar uses `keep_alive: 0` so models load one at a time.
-  - **No GPU?** Ollama also runs on CPU only — it's much slower (10–60× slower for small models) but functional.
+- **[Node.js](https://nodejs.org) 18 or later** — verify with `node --version`.
+- **[Ollama](https://ollama.com)** — install the app, then launch it once so it's running (Windows tray icon / macOS menu bar).
+- **[Docker Desktop](https://docs.docker.com/desktop/)** — required for SearXNG (self-hosted search). Sonar will prompt you if it's missing.
+- **A GPU with ~8 GB+ VRAM** (recommended) — Ollama auto-detects NVIDIA, AMD, and Apple Silicon.
+  - **Less VRAM?** Sonar auto-selects smaller models. No GPU? Ollama runs on CPU (10–60× slower but functional).
 
 ### The installer handles these automatically
 
-- ✅ `npm install` — Node dependencies (`@modelcontextprotocol/sdk`, `node-fetch`)
-- ✅ `ollama pull llama3.1:8b` — general-task model (~5 GB)
-- ✅ `ollama pull qwen2.5-coder:7b` — coding model (~5 GB)
-- ✅ Edits `claude_desktop_config.json` to register the MCP server (existing entries preserved)
+- ✅ `npm install` — Node dependencies
+- ✅ Ollama model pulls — selects models based on your available VRAM
+- ✅ Edits `claude_desktop_config.json` to register the MCP server
+- ✅ Writes Sonar self-heal instructions to `~/.claude/CLAUDE.md`
 - ✅ Verifies the server starts cleanly before finishing
-
-If a model is already pulled or dependencies are already installed, the installer skips that step.
 
 ---
 
 ## 🚀 Installation
 
 ### Automatic (recommended)
-
-Clone the repo, then run the installer — it handles everything:
 
 ```bash
 git clone https://github.com/wanz1000/sonar-mcp.git
@@ -79,25 +86,25 @@ npm install
 npm run setup
 ```
 
-The installer is **read-only until you confirm**. It runs pre-flight checks, prints a summary of exactly what it will do, and asks `Proceed? [y/N]` before any changes. If you say no, nothing changes.
+The installer is **read-only until you confirm**. It runs pre-flight checks, prints a summary of every change it will make, and asks `Proceed? [y/N]` before touching anything.
 
 Once confirmed it will:
-1. ✔ Verify Node.js 18+ (prompts to update if too old, doesn't proceed otherwise)
-2. ✔ Run `npm install` (only if `node_modules` doesn't already exist)
-3. ✔ Pull `llama3.1:8b` + `qwen2.5-coder:7b` (only the ones not already present)
+1. ✔ Verify Node.js 18+
+2. ✔ Run `npm install`
+3. ✔ Pull Ollama models appropriate for your VRAM
 4. ✔ Auto-detect your Claude Desktop config file (Windows/macOS/Linux)
-5. ✔ Add ONE entry to `claude_desktop_config.json` — every other entry is preserved
-6. ✔ Verify the server starts cleanly
+5. ✔ Register the MCP server in `claude_desktop_config.json`
+6. ✔ Write Sonar self-heal instructions to `~/.claude/CLAUDE.md`
+7. ✔ Verify the server starts cleanly
 
 When it finishes, **fully quit Claude Desktop** (system tray / menu bar — don't just close the window) and reopen it. Done.
 
 ### 🛡️ Safety guarantees
 
-- **Read-only pre-flight.** No file is written until you confirm at the `Proceed?` prompt.
-- **Always backs up first.** Before editing `claude_desktop_config.json`, the installer writes `claude_desktop_config.json.bak-<timestamp>` next to it so you can recover manually any time.
-- **Auto-rollback on failure or Ctrl+C.** If anything errors mid-install — or you cancel — the installer restores your original config exactly as it was, and removes `node_modules` if it didn't exist before. Your existing Ollama models are *never* removed (they may be useful for other things).
-- **Version checks halt the installer.** If Node.js is too old, you're prompted to update or cancel; no changes happen until both are resolved.
-- **Run with `--yes` to skip the prompt** (for CI/automation): `npm run setup -- --yes`
+- **Read-only pre-flight.** No file is written until you confirm.
+- **Always backs up first.** Writes `claude_desktop_config.json.bak-<timestamp>` before editing.
+- **Auto-rollback on failure or Ctrl+C.** Restores original config; removes `node_modules` if it didn't exist before.
+- **Run with `--yes` to skip the prompt** (CI/automation): `npm run setup -- --yes`
 
 ---
 
@@ -108,9 +115,10 @@ When it finishes, **fully quit Claude Desktop** (system tray / menu bar — don'
 
 **1. Pull the Ollama models**
 ```bash
-ollama pull llama3.1:8b
-ollama pull qwen2.5-coder:7b
+ollama pull gemma3:12b
+ollama pull qwen2.5-coder:14b
 ```
+(Or smaller variants like `gemma3:4b` + `qwen2.5-coder:7b` for GPUs with less VRAM — Sonar auto-selects at runtime.)
 
 **2. Clone and install**
 ```bash
@@ -128,7 +136,7 @@ npm install
 
 **4. Add the MCP server config**
 
-Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your cloned folder:
+Replace `ABSOLUTE_PATH` with the full path to your cloned folder:
 
 ```json
 {
@@ -142,13 +150,17 @@ Add (or merge) this block — replace `ABSOLUTE_PATH` with the full path to your
 }
 ```
 
-**5. Restart Claude Desktop**
+**5. Start SearXNG (for web search)**
+```bash
+docker run -d --name searxng --restart unless-stopped \
+  -p 8888:8080 \
+  -e SEARXNG_BASE_URL="http://localhost:8888/" \
+  searxng/searxng:latest
+```
+
+**6. Restart Claude Desktop**
 
 Fully quit (system tray / menu bar) and reopen.
-
-**6. Confirm it's connected**
-
-Go to **Claude Desktop → Settings → Developer**. You should see `ollama-local` with a green connected status.
 
 </details>
 
@@ -156,24 +168,19 @@ Go to **Claude Desktop → Settings → Developer**. You should see `ollama-loca
 
 ## 🔄 Updating
 
-To pull the latest version from GitHub, from your cloned folder run:
-
 ```bash
 npm run update
 ```
 
-(or equivalently `node install.js --update`)
+This fetches and shows incoming commits, asks for confirmation, re-installs deps if needed, and verifies the server starts before finishing. Restart Claude Desktop after updating.
 
-This will:
+To enable in-Claude updates (from inside a conversation):
 
-1. `git fetch` and show you exactly which new commits are coming
-2. Ask for confirmation before pulling — same safety guarantees apply
-3. `npm install` only if dependencies actually changed
-4. Verify the updated MCP server starts cleanly before reporting success
+```bash
+SONAR_ALLOW_UPDATE=1 node index.js
+```
 
-If you're already on the latest version, it exits immediately and tells you so. After a successful update, **fully restart Claude Desktop** for the new code to take effect.
-
-You can also see the running version any time by asking `sonar_stats` — it prints the current `sonar-mcp` version on the first line.
+Then use `sonar_update_check` to see what's new and `sonar_update` to apply it.
 
 ---
 
@@ -190,88 +197,108 @@ sonar_stats
 sonar_health
 ```
 
-Sonar routes it automatically and returns the answer — no confirmation prompts. The result shows which model handled it:
+Sonar routes it automatically. The result shows which model handled it:
 
 ```
-[routed to llama3.1:8b]
+[routed to gemma3:12b]
 
 Transformers are a neural network architecture...
+
+---
+📊 Sonar — this query: 1,240 tokens (0.6% of Pro session) · session: 4,820 tokens · ~$0.02 saved · 3 req
 ```
 
 ### Optional parameters
 
-`sonar` accepts three optional parameters alongside `prompt`:
-
 | Parameter | Type | What it does |
 |---|---|---|
 | `model` | `auto` \| `simple` \| `coder` \| `vision` \| `web` | Force a route instead of auto-classifying. Default `auto`. |
-| `image_path` | string | Local file path or URL of an image — routes to the vision model. |
-| `use_history` | boolean | Carry the last few sonar exchanges as context for follow-up questions. Default `false`. |
-
-Examples in natural language:
-
-```
-sonar describe this image — image_path C:\photos\chart.png
-sonar (force coder) refactor this loop into a list comprehension
-sonar remember my project is called Apollo, then in a follow-up: what's my project called?  (use_history)
-```
+| `image_path` | string | Local file path of an image — routes to the vision model. |
+| `use_history` | boolean | Carry the last few sonar exchanges as context. Default `false`. |
 
 ---
 
 ## 🗂 Token stats & savings
 
-`token-stats.json` is created automatically next to `index.js` and updated after every call.
+`token-stats.json` is created automatically next to `index.js` and updated after every call. A summary footer is appended to every `sonar` response automatically.
 
-Ask `sonar_stats` any time to see your totals and the estimated Claude API cost avoided:
+Ask `sonar_stats` any time for full totals:
 
 ```
-📊 Sonar Token Usage (processed locally)   sonar-mcp v1.0.0
+📊 Sonar Token Usage (processed locally)   sonar-mcp v1.19.0
 
-  Today   : 1,240 tokens across 6 requests  (~$0.04 saved)
+  Today   : 1,240 tokens across 6 requests   (~$0.04 saved)
   Week    : 8,430 tokens across 41 requests  (~$0.21 saved)
-  Month   : 31,200 tokens across 158 requests  (~$0.78 saved)
-  Year    : 31,200 tokens across 158 requests  (~$0.78 saved)
+  Month   : 31,200 tokens across 158 requests (~$0.78 saved)
+  Year    : 31,200 tokens across 158 requests (~$0.78 saved)
 ```
 
-The dollar estimate uses the rates in `sonar.config.json` (default $3/M input, $15/M output).
+### Claude Desktop session tracking
+
+Install the Stop hook to automatically log your Claude Desktop session token usage:
+
+```bash
+npm run setup
+```
+
+The installer adds a Stop hook to `~/.claude/settings.json` that logs each session's token count when Claude Desktop closes.
 
 ---
 
 ## ⚙️ Configuration
 
-All settings have built-in defaults — sonar works with no config file. To customize, copy the example:
+All settings have built-in defaults — Sonar works with no config file. To customize:
 
 ```bash
 cp sonar.config.example.json sonar.config.json
 ```
 
-`sonar.config.json` is git-ignored, so your settings survive `npm run update`. Keys (all optional):
+`sonar.config.json` is git-ignored, so your settings survive `npm run update`.
 
 | Key | Default | Purpose |
 |---|---|---|
 | `ollamaUrl` | `http://localhost:11434` | Where Ollama is reachable |
-| `models.simple` | `llama3.1:8b` | General-task model |
-| `models.coder` | `qwen2.5-coder:7b` | Coding model |
-| `models.vision` | `gemma3:12b` | Image/vision model |
-| `search.engines` | all | Array of engines to query in parallel: `duckduckgo`, `duckduckgo-lite`, `wikipedia`, `ddg-instant`, `searxng` |
-| `search.searxngUrl` | `""` | Your SearXNG instance URL — enables the `searxng` engine |
-| `pricing.inputPerMillion` | `3.0` | Claude input price used for the savings estimate |
-| `pricing.outputPerMillion` | `15.0` | Claude output price used for the savings estimate |
+| `autoSelectModels` | `true` | Auto-pick models based on free VRAM at startup |
+| `models.simple` | `gemma3:12b` | General-task model (fallback when autoSelect is off) |
+| `models.coder` | `qwen2.5-coder:14b` | Coding model |
+| `models.vision` | `gemma3:12b` | Vision model |
+| `numCtx` | `8192` | Context window tokens per request |
+| `useMmap` | `true` | Memory-map model weights (reduces VRAM commit pressure) |
+| `search.searxngUrl` | `http://localhost:8888` | Your SearXNG instance URL |
+| `pricing.inputPerMillion` | `3.0` | Claude input price for savings estimate |
+| `pricing.outputPerMillion` | `15.0` | Claude output price for savings estimate |
 | `historyTurns` | `3` | How many prior exchanges `use_history` keeps |
 
-Run `sonar_health` after changing config to confirm the new models are pulled and ready.
+### Optional API keys (`sonar.secrets.json`)
+
+For optional paid search engines, create `sonar.secrets.json` (git-ignored, user-only file permissions):
+
+```json
+{
+  "braveApiKey": "BSA...",
+  "tavilyApiKey": "tvly-...",
+  "serpApiKey": "..."
+}
+```
+
+Run `npm run setup-search` for a guided wizard that creates this file securely.
 
 ---
 
 ## 🛠 Customization
 
-Beyond `sonar.config.json`, open `index.js` to tune the `WEB_KEYWORDS` list (what triggers a live search) or the `fetchUrl` character limit (how much page content is sent to the model). The routing paths (simple / coder / vision / web) are clearly separated and easy to extend.
+Beyond `sonar.config.json`, open `index.js` to tune:
+- `WEB_KEYWORDS` — what triggers a live web search
+- `MODEL_VRAM_GB` — VRAM estimates for model auto-selection
+- `ROLE_PREFERENCES` — ordered model candidates per role
+- `ENGINES` — SearXNG engine list passed per-query
+- `SKIP_HOSTS` — domains skipped during article body fetch
 
 ---
 
 ## 📜 Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the version history.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 ---
 
