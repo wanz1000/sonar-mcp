@@ -257,7 +257,7 @@ Transformers are a neural network architecture...
 Ask `sonar_stats` any time for full totals:
 
 ```
-📊 Sonar Token Usage (processed locally)   sonar-mcp v1.19.0
+📊 Sonar Token Usage (processed locally)   sonar-mcp v1.20.0
 
   Today   : 1,240 tokens across 6 requests   (~$0.04 saved)
   Week    : 8,430 tokens across 41 requests  (~$0.21 saved)
